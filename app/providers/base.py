@@ -20,6 +20,13 @@ class ProviderResponse:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
 
+    @property
+    def total_tokens(self) -> int | None:
+        """Prompt plus completion tokens, or None when either is unknown."""
+        if self.prompt_tokens is None or self.completion_tokens is None:
+            return None
+        return self.prompt_tokens + self.completion_tokens
+
 
 class ProviderError(Exception):
     """Base class for the common error types every provider must raise.
@@ -72,7 +79,7 @@ class TargetMisconfigured(ProviderError):
 class ContextTooLarge(ProviderError):
     """The request is too large for this target, but may fit a larger one."""
 
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int | None = None) -> None:
         super().__init__("request too large for this model", status_code)
 
 

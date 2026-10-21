@@ -61,6 +61,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         TargetGate(redis_client, config.cooldown),
         deadline=config.deadline,
         min_attempt_time=config.min_attempt_time,
+        default_completion_tokens=config.default_completion_tokens,
     )
     app.state.usage_log = UsageLog(database_engine)
     app.add_exception_handler(RequestValidationError, validation_error_handler)

@@ -20,7 +20,8 @@ from app.providers.base import (
     RateLimited,
     TargetMisconfigured,
 )
-from app.routing.acquisition import Refusal, TargetGate
+from app.routing.acquisition import Refusal, Reservation, TargetGate
+from app.routing.quotas import estimate_call_tokens, estimate_prompt_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ class Outcome(StrEnum):
     INVALID_REQUEST = "invalid_request"
     CONTEXT_TOO_LARGE = "context_too_large"
     SKIPPED_COOLDOWN = "skipped_cooldown"
+    SKIPPED_QUOTA = "skipped_quota"
 
 
 @dataclass(frozen=True)
@@ -110,9 +112,35 @@ class Attempt:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     error_message: str | None = None
+    estimated_tokens: int | None = None
 
     @classmethod
-    def failed(cls, target: Target, error: ProviderError, latency_ms: int) -> "Attempt":
+    def skipped(
+        cls, target: Target, outcome: "Outcome", reason: str, estimated_tokens: int
+    ) -> "Attempt":
+        """Build the attempt of a target that was examined but not called."""
+        return cls(target, outcome, error_message=reason, estimated_tokens=estimated_tokens)
+
+    @classmethod
+    def succeeded(
+        cls, target: Target, response: ProviderResponse, latency_ms: int, estimated_tokens: int
+    ) -> "Attempt":
+        """Build the attempt of a successful provider call."""
+        return cls(
+            target,
+            Outcome.SUCCESS,
+            latency_ms=latency_ms,
+            # Providers only return a response for a successful upstream call.
+            status_code=HTTPStatus.OK,
+            prompt_tokens=response.prompt_tokens,
+            completion_tokens=response.completion_tokens,
+            estimated_tokens=estimated_tokens,
+        )
+
+    @classmethod
+    def failed(
+        cls, target: Target, error: ProviderError, latency_ms: int, estimated_tokens: int
+    ) -> "Attempt":
         """Build the attempt of a provider call that raised `error`."""
         return cls(
             target,
@@ -120,6 +148,7 @@ class Attempt:
             latency_ms=latency_ms,
             status_code=error.status_code,
             error_message=_describe(error),
+            estimated_tokens=estimated_tokens,
         )
 
 
@@ -175,23 +204,29 @@ class Router:
         *,
         deadline: float,
         min_attempt_time: float,
+        default_completion_tokens: int,
     ) -> None:
         self._routes = routes
         self._providers = providers
         self._gate = gate
         self._deadline = deadline
         self._min_attempt_time = min_attempt_time
+        self._default_completion_tokens = default_completion_tokens
 
     async def route(
         self, alias: str, body: dict[str, Any], *, attempts: list[Attempt]
     ) -> RoutedResponse:
         """Send the request to the targets of `alias` in order, until one answers.
 
-        A target that `TargetGate.acquire` refuses (for example in cooldown) is
-        skipped without a call. An `InvalidRequest` stops the loop: the client
-        request is wrong, and every other target would refuse it too. Any other
-        provider error moves on to the next target. A 429 or a misconfiguration
-        error puts the target in cooldown for the next requests.
+        Each target is skipped without a call when the prompt alone is larger
+        than its TPM, or when `TargetGate.acquire` refuses it (cooldown, or a
+        full RPM/TPM/RPD quota). Otherwise its quota is reserved, the provider
+        is called, and the reservation is then corrected or released.
+
+        An `InvalidRequest` stops the loop: the client request is wrong, and
+        every other target would refuse it too. Any other provider error moves
+        on to the next target. A 429 or a misconfiguration error puts the
+        target in cooldown for the next requests.
 
         The whole request must finish within the gateway deadline. Each attempt
         gets `min(model timeout, remaining deadline)`, and no new attempt starts
@@ -215,19 +250,31 @@ class Router:
         if not targets:
             raise NoEnabledTarget(alias)
         deadline_at = time.monotonic() + self._deadline
+        prompt_tokens = estimate_prompt_tokens(body)
         failures: list[tuple[Target, ProviderError | Refusal]] = []
         waits: list[float] = []
         for index, target in enumerate(targets):
             remaining = deadline_at - time.monotonic()
             if remaining < self._min_attempt_time:
                 raise DeadlineExceeded(alias, self._deadline, failures)
-            refusal = await self._gate.acquire(target)
-            if refusal is not None:
+            tpm = target.limits.tpm
+            if tpm is not None and prompt_tokens > tpm:
+                # Even an empty window could not hold this prompt: skip without a penalty.
+                reason = f"prompt estimate of {prompt_tokens} tokens is above the TPM of {tpm}"
                 attempts.append(
-                    Attempt(target, Outcome.SKIPPED_COOLDOWN, error_message=str(refusal))
+                    Attempt.skipped(target, Outcome.CONTEXT_TOO_LARGE, reason, prompt_tokens)
                 )
-                failures.append((target, refusal))
-                waits.append(refusal.wait_seconds)
+                failures.append((target, ContextTooLarge()))
+                continue
+            estimated_tokens = estimate_call_tokens(
+                prompt_tokens, body, self._default_completion_tokens, tpm
+            )
+            acquired = await self._gate.acquire(target, estimated_tokens)
+            if isinstance(acquired, Refusal):
+                outcome = Outcome.SKIPPED_QUOTA if acquired.is_quota else Outcome.SKIPPED_COOLDOWN
+                attempts.append(Attempt.skipped(target, outcome, str(acquired), estimated_tokens))
+                failures.append((target, acquired))
+                waits.append(acquired.wait_seconds)
                 continue
             provider = self._providers[target.provider.name]
             attempt_timeout = min(target.limits.timeout, remaining)
@@ -235,29 +282,26 @@ class Router:
             try:
                 response = await _call_with_timeout(provider, target.model, body, attempt_timeout)
             except InvalidRequest as error:
-                attempts.append(Attempt.failed(target, error, _elapsed_ms(started)))
+                attempts.append(
+                    Attempt.failed(target, error, _elapsed_ms(started), estimated_tokens)
+                )
+                await self._record_failure(target, acquired, error)
                 raise TargetRejectedRequest(target, error) from error
             except ProviderError as error:
-                attempts.append(Attempt.failed(target, error, _elapsed_ms(started)))
+                attempts.append(
+                    Attempt.failed(target, error, _elapsed_ms(started), estimated_tokens)
+                )
                 failures.append((target, error))
-                cooldown = await self._record_failure(target, error)
+                cooldown = await self._record_failure(target, acquired, error)
                 if cooldown is not None:
                     waits.append(cooldown)
                 if isinstance(error, ProviderTimeout) and attempt_timeout < target.limits.timeout:
                     # The deadline cut this attempt short, not the model's own timeout.
                     raise DeadlineExceeded(alias, self._deadline, failures) from error
                 continue
-            await self._gate.record_success(target)
+            await self._gate.record_success(target, acquired, response.total_tokens)
             attempts.append(
-                Attempt(
-                    target,
-                    Outcome.SUCCESS,
-                    latency_ms=_elapsed_ms(started),
-                    # Providers only return a response for a successful upstream call.
-                    status_code=HTTPStatus.OK,
-                    prompt_tokens=response.prompt_tokens,
-                    completion_tokens=response.completion_tokens,
-                )
+                Attempt.succeeded(target, response, _elapsed_ms(started), estimated_tokens)
             )
             return RoutedResponse(
                 body={**response.body, "model": target.model}, target=target, fallbacks=index
@@ -266,20 +310,25 @@ class Router:
             raise RequestTooLarge(alias)
         raise AllTargetsFailed(alias, failures, retry_after=min(waits, default=None))
 
-    async def _record_failure(self, target: Target, error: ProviderError) -> float | None:
+    async def _record_failure(
+        self, target: Target, reservation: Reservation, error: ProviderError
+    ) -> float | None:
         """Update the shared state of `target` after a failed call.
 
         Returns the cooldown the target is now in, in seconds, or None.
         """
         if isinstance(error, RateLimited):
-            return await self._gate.record_rate_limited(target, error.retry_after)
+            return await self._gate.record_rate_limited(target, reservation, error.retry_after)
         if isinstance(error, TargetMisconfigured):
             logger.error(
                 "target %s is misconfigured (HTTP %s): check its API key and model name",
                 target.name,
                 error.status_code,
             )
-            return await self._gate.record_misconfigured(target)
+            return await self._gate.record_misconfigured(target, reservation)
+        await self._gate.record_failure(
+            target, reservation, keep_tokens=isinstance(error, ProviderTimeout)
+        )
         return None
 
 

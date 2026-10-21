@@ -56,6 +56,18 @@ def test_startup_fails_when_route_references_unknown_model(
             routes: {}
             """,
         ),
+        (
+            "unknown timezone",
+            """
+            providers:
+              ollama:
+                base_url: http://ollama.test/v1
+                api_key_env: null
+                daily_reset: { timezone: "Mars/Olympus_Mons" }
+                models: { m: {} }
+            routes: {}
+            """,
+        ),
     ],
 )
 def test_startup_fails_on_invalid_structure(

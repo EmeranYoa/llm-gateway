@@ -1,5 +1,6 @@
 """OpenAI-compatible request and response models."""
 
+from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,8 +26,12 @@ class ChatCompletionRequest(BaseModel):
         Counts every string value the model reads in `messages`, `tools` and
         `response_format`. JSON keys and punctuation are not counted.
         """
-        extra = self.model_extra or {}
-        return _count_chars([self.messages, extra.get("tools"), extra.get("response_format")])
+        return count_prompt_chars(self.model_dump(exclude_unset=True))
+
+
+def count_prompt_chars(body: Mapping[str, Any]) -> int:
+    """Count every string value the model reads in `messages`, `tools` and `response_format`."""
+    return _count_chars([body.get("messages"), body.get("tools"), body.get("response_format")])
 
 
 def _count_chars(value: object) -> int:

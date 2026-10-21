@@ -62,7 +62,8 @@ async def test_success_row_stores_prompt_length_and_real_token_usage(
     assert row["status_code"] == 200
     assert row["prompt_tokens"] == 5
     assert row["completion_tokens"] == 2
-    assert row["estimated_tokens"] is None
+    # 30 characters -> 8 prompt tokens, plus the default 512 completion tokens.
+    assert row["estimated_tokens"] == 8 + 512
     assert row["degraded"] is False
     assert row["error_message"] is None
     assert before <= row["created_at"] <= dt.datetime.now(dt.UTC)
@@ -169,8 +170,9 @@ async def test_each_row_stores_the_latency_of_its_attempt(
     await failover_client.post("/v1/chat/completions", json=CHAT_REQUEST)
 
     failed_row, success_row = await usage_rows()
-    assert 200 <= failed_row["latency_ms"] < 1000
-    assert 50 <= success_row["latency_ms"] < 200
+    # Lower bounds allow for timers that fire up to one clock tick early (about 16 ms on Windows).
+    assert 180 <= failed_row["latency_ms"] < 1000
+    assert 30 <= success_row["latency_ms"] < 200
 
 
 async def test_request_ending_in_503_logs_every_target(
