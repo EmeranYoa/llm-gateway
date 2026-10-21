@@ -26,8 +26,11 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code configuration (local only)
+.claude/
 
 # Local assistant instructions (private)
 CLAUDE.md
+
+# Design documents (local only)
+docs/
