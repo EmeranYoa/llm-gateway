@@ -1,0 +1,5 @@
+# Store text files with LF line endings in the repository and in checkouts.
+* text=auto eol=lf
+
+# Shell scripts must keep LF or bash fails to run them.
+*.sh text eol=lf
