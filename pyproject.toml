@@ -1,0 +1,62 @@
+[project]
+name = "llm-gateway"
+version = "0.1.0"
+description = "OpenAI-compatible gateway that routes chat requests across free-tier LLM providers with quotas and automatic failover."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic",
+    "asyncpg",
+    "fastapi",
+    "httpx",
+    "pydantic>=2",
+    "pydantic-settings",
+    "redis",
+    "sqlalchemy[asyncio]>=2",
+]
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+    "respx",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "ASYNC", # flake8-async
+    "RUF",   # ruff-specific rules
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
