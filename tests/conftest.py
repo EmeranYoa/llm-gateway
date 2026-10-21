@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.upstream import CHAT_CONFIG, GROQ_KEY
 
 MINIMAL_CONFIG = """
 providers:
@@ -55,4 +56,18 @@ def make_client(write_config: Callable[[str], Settings]) -> ClientFactory:
 async def client(make_client: ClientFactory) -> AsyncIterator[AsyncClient]:
     """HTTP client for a gateway started with a minimal valid config."""
     async with make_client(MINIMAL_CONFIG) as http_client:
+        yield http_client
+
+
+@pytest.fixture
+async def chat_client(
+    make_client: ClientFactory, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[AsyncClient]:
+    """HTTP client for a gateway routing `chat-fast` to a fake Groq provider.
+
+    `chat-offline` points to Gemini, which is disabled because its key is not set.
+    """
+    monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    async with make_client(CHAT_CONFIG) as http_client:
         yield http_client

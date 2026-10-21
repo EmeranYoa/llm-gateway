@@ -74,7 +74,7 @@ class FileConfig(_FileModel):
 
 
 @dataclass(frozen=True)
-class Provider:
+class ProviderSettings:
     name: str
     base_url: str
     api_key: SecretStr | None
@@ -85,7 +85,7 @@ class Provider:
 class Target:
     """One real `provider/model` pair that can serve an alias."""
 
-    provider: Provider
+    provider: ProviderSettings
     model: str
     limits: ModelConfig
 
@@ -153,12 +153,12 @@ def _check_route_references(file_config: FileConfig) -> None:
 
 def _resolve_providers(
     file_config: FileConfig, environ: Mapping[str, str]
-) -> tuple[dict[str, Provider], list[str]]:
+) -> tuple[dict[str, ProviderSettings], list[str]]:
     """Return enabled providers by name, and the names of disabled ones.
 
     A provider is disabled when it needs an API key and the key is not set.
     """
-    providers: dict[str, Provider] = {}
+    providers: dict[str, ProviderSettings] = {}
     disabled: list[str] = []
     for name, provider_config in file_config.providers.items():
         api_key = _api_key(provider_config, environ)
@@ -168,7 +168,7 @@ def _resolve_providers(
             )
             disabled.append(name)
             continue
-        providers[name] = Provider(
+        providers[name] = ProviderSettings(
             name=name,
             base_url=provider_config.base_url,
             api_key=api_key,
@@ -178,7 +178,7 @@ def _resolve_providers(
 
 
 def _resolve_routes(
-    file_config: FileConfig, providers: Mapping[str, Provider]
+    file_config: FileConfig, providers: Mapping[str, ProviderSettings]
 ) -> dict[str, tuple[Target, ...]]:
     """Turn route references into targets. Targets of disabled providers are dropped."""
     routes: dict[str, tuple[Target, ...]] = {}

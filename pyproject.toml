@@ -44,6 +44,9 @@ select = [
     "ASYNC", # flake8-async
     "RUF",   # ruff-specific rules
 ]
+# Domain error names come from the project vocabulary (RateLimited, UnknownAlias, ...),
+# not from the "Error" suffix convention.
+ignore = ["N818"]
 
 [tool.ruff.format]
 quote-style = "double"
