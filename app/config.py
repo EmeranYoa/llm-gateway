@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     """Settings read from environment variables."""
 
     gateway_config_path: Path = Path("config/gateway.yaml")
+    # Default: the PostgreSQL started by docker compose, seen from the host.
+    database_url: str = "postgresql+asyncpg://gateway:gateway@localhost:5432/gateway"
 
 
 # --- File format (what `gateway.yaml` looks like) ---

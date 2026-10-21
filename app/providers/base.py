@@ -11,9 +11,14 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ProviderResponse:
-    """A successful chat completion returned by a provider."""
+    """A successful chat completion returned by a provider.
+
+    Token counts come from the provider `usage` field, or are None when it is missing.
+    """
 
     body: dict[str, Any]
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class ProviderError(Exception):
@@ -21,14 +26,21 @@ class ProviderError(Exception):
 
     Providers translate upstream failures into these types, so the router can
     decide what to do (fail over or not) without knowing the provider.
+
+    `status_code` is the upstream HTTP status, or None when no response came back
+    (network error, timeout).
     """
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class RateLimited(ProviderError):
     """HTTP 429: the provider refuses the call because a limit is reached."""
 
     def __init__(self, retry_after: float | None) -> None:
-        super().__init__("rate limited")
+        super().__init__("rate limited", status_code=429)
         self.retry_after = retry_after
 
 
@@ -54,15 +66,14 @@ class TargetMisconfigured(ProviderError):
     """
 
     def __init__(self, status_code: int) -> None:
-        super().__init__(f"misconfigured (HTTP {status_code})")
-        self.status_code = status_code
+        super().__init__(f"misconfigured (HTTP {status_code})", status_code)
 
 
 class ContextTooLarge(ProviderError):
     """The request is too large for this target, but may fit a larger one."""
 
-    def __init__(self) -> None:
-        super().__init__("request too large for this model")
+    def __init__(self, status_code: int) -> None:
+        super().__init__("request too large for this model", status_code)
 
 
 class InvalidRequest(ProviderError):
@@ -72,6 +83,8 @@ class InvalidRequest(ProviderError):
     provider would refuse it too.
     """
 
+    status_code: int  # always set: the provider answered with an HTTP error
+
     def __init__(
         self,
         status_code: int,
@@ -80,8 +93,7 @@ class InvalidRequest(ProviderError):
         param: str | None = None,
         code: str | None = None,
     ) -> None:
-        super().__init__(message)
-        self.status_code = status_code
+        super().__init__(message, status_code)
         self.message = message
         self.error_type = error_type
         self.param = param

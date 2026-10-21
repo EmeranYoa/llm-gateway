@@ -7,12 +7,14 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.api.routes import router, validation_error_handler
 from app.config import Settings, load_config
 from app.providers.base import Provider
 from app.providers.openai_compat import OpenAICompatibleProvider
 from app.routing.router import Router
+from app.storage.usage import UsageLog
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -24,6 +26,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     config = load_config(settings.gateway_config_path, os.environ)
     http_client = httpx.AsyncClient()
+    # The engine connects lazily: the gateway starts even when PostgreSQL is down.
+    database_engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 
     providers: dict[str, Provider] = {}
     for targets in config.routes.values():
@@ -36,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
         await http_client.aclose()
+        await database_engine.dispose()
 
     app = FastAPI(title="LLM Gateway", version="0.1.0", lifespan=lifespan)
     app.state.config = config
@@ -45,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         deadline=config.deadline,
         min_attempt_time=config.min_attempt_time,
     )
+    app.state.usage_log = UsageLog(database_engine)
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.include_router(router)
     return app

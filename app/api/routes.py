@@ -1,23 +1,27 @@
 """HTTP routes of the gateway."""
 
+import datetime as dt
 from typing import Annotated, Any, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import GatewayConfig
 from app.routing.router import (
     AllTargetsFailed,
+    Attempt,
     DeadlineExceeded,
     NoEnabledTarget,
     RequestTooLarge,
+    RoutedResponse,
     Router,
     TargetRejectedRequest,
     UnknownAlias,
 )
 from app.schemas import ChatCompletionRequest, ErrorBody, ErrorDetail
+from app.storage.usage import UsageLog
 
 router = APIRouter()
 
@@ -30,6 +34,11 @@ def get_config(request: Request) -> GatewayConfig:
 def get_router(request: Request) -> Router:
     """Return the router built at startup."""
     return cast(Router, request.app.state.router)
+
+
+def get_usage_log(request: Request) -> UsageLog:
+    """Return the usage log built at startup."""
+    return cast(UsageLog, request.app.state.usage_log)
 
 
 @router.get("/health")
@@ -79,10 +88,41 @@ async def validation_error_handler(_: Request, exc: Exception) -> JSONResponse:
 async def chat_completions(
     request: ChatCompletionRequest,
     response: Response,
+    background_tasks: BackgroundTasks,
     gateway_router: Annotated[Router, Depends(get_router)],
+    usage_log: Annotated[UsageLog, Depends(get_usage_log)],
 ) -> dict[str, Any] | JSONResponse:
-    """Route an OpenAI chat completion request to a provider/model target."""
+    """Route an OpenAI chat completion request to a provider/model target.
+
+    Every examined target is written to the usage log after the response is
+    sent, whether the request succeeds or ends in an error.
+    """
     request_id = uuid4().hex
+    received_at = dt.datetime.now(dt.UTC)
+    attempts: list[Attempt] = []
+    result = await _route(gateway_router, request, attempts)
+    background_tasks.add_task(
+        usage_log.write,
+        request_id=request_id,
+        received_at=received_at,
+        alias=request.model,
+        prompt_chars=request.prompt_chars(),
+        attempts=attempts,
+    )
+    if isinstance(result, JSONResponse):
+        result.headers["X-Gateway-Request-Id"] = request_id
+        return result
+    response.headers["X-Gateway-Provider"] = result.target.provider.name
+    response.headers["X-Gateway-Model"] = result.target.model
+    response.headers["X-Gateway-Fallbacks"] = str(result.fallbacks)
+    response.headers["X-Gateway-Request-Id"] = request_id
+    return result.body
+
+
+async def _route(
+    gateway_router: Router, request: ChatCompletionRequest, attempts: list[Attempt]
+) -> RoutedResponse | JSONResponse:
+    """Route the request, or build the OpenAI error response that explains why it failed."""
     if request.stream:
         return error_response(
             400,
@@ -92,7 +132,9 @@ async def chat_completions(
             code="unsupported_parameter",
         )
     try:
-        routed = await gateway_router.route(request.model, request.model_dump(exclude_unset=True))
+        return await gateway_router.route(
+            request.model, request.model_dump(exclude_unset=True), attempts=attempts
+        )
     except UnknownAlias as exc:
         return error_response(
             404,
@@ -129,8 +171,3 @@ async def chat_completions(
         return error_response(503, str(exc), "api_error", code="all_targets_failed")
     except DeadlineExceeded as exc:
         return error_response(504, str(exc), "api_error", code="deadline_exceeded")
-    response.headers["X-Gateway-Provider"] = routed.target.provider.name
-    response.headers["X-Gateway-Model"] = routed.target.model
-    response.headers["X-Gateway-Fallbacks"] = str(routed.fallbacks)
-    response.headers["X-Gateway-Request-Id"] = request_id
-    return routed.body

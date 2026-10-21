@@ -13,6 +13,9 @@ RUN uv sync --frozen --no-dev
 
 COPY app ./app
 COPY config ./config
+COPY alembic.ini ./
+COPY migrations ./migrations
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+# Bring the database schema up to date, then start the gateway.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000"]

@@ -1,12 +1,18 @@
 """Shared test fixtures."""
 
-from collections.abc import AsyncIterator, Callable
+import os
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from textwrap import dedent
+from typing import Any
 
 import pytest
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings
 from app.main import create_app
@@ -24,18 +30,68 @@ routes:
 """
 
 ClientFactory = Callable[[str], AbstractAsyncContextManager[AsyncClient]]
+FetchUsageRows = Callable[[], Awaitable[list[dict[str, Any]]]]
+
+# Tests need a real PostgreSQL. Locally, start a throwaway one with:
+#   docker run -d --rm --name gateway-test-pg -e POSTGRES_PASSWORD=test \
+#     -e POSTGRES_DB=gateway_test -p 55432:5432 postgres:17-alpine
+DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://postgres:test@localhost:55432/gateway_test"
+
+
+@pytest.fixture(scope="session")
+def database_url() -> str:
+    """URL of the test database, migrated from scratch once per test session.
+
+    Downgrading to `base` first means every session also checks that the
+    migrations apply cleanly to an empty database.
+    """
+    url = os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+    alembic_config = AlembicConfig(Path(__file__).parent.parent / "alembic.ini")
+    alembic_config.set_main_option("sqlalchemy.url", url)
+    alembic_config.attributes["configure_logging"] = False
+    command.downgrade(alembic_config, "base")
+    command.upgrade(alembic_config, "head")
+    return url
 
 
 @pytest.fixture
-def write_config(tmp_path: Path) -> Callable[[str], Settings]:
-    """Write a gateway.yaml file and return settings that point to it."""
+async def usage_rows(database_url: str) -> AsyncIterator[FetchUsageRows]:
+    """Empty the `usage_log` table, then return a function that reads its rows in insert order."""
+    engine = create_async_engine(database_url)
+    async with engine.begin() as connection:
+        await connection.execute(text("TRUNCATE usage_log"))
+
+    async def _fetch() -> list[dict[str, Any]]:
+        async with engine.connect() as connection:
+            result = await connection.execute(text("SELECT * FROM usage_log ORDER BY id"))
+            return [dict(row) for row in result.mappings()]
+
+    yield _fetch
+    await engine.dispose()
+
+
+@pytest.fixture
+def write_config(tmp_path: Path, database_url: str) -> Callable[[str], Settings]:
+    """Write a gateway.yaml file and return settings that point to it and to the test database."""
 
     def _write(config_yaml: str) -> Settings:
         path = tmp_path / "gateway.yaml"
         path.write_text(dedent(config_yaml), encoding="utf-8")
-        return Settings(gateway_config_path=path)
+        return Settings(gateway_config_path=path, database_url=database_url)
 
     return _write
+
+
+@asynccontextmanager
+async def gateway_client(settings: Settings) -> AsyncIterator[AsyncClient]:
+    """Start a gateway with `settings` (startup and shutdown included) and yield a client for it."""
+    app = create_app(settings)
+    transport = ASGITransport(app=app)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=transport, base_url="http://gateway") as http_client,
+    ):
+        yield http_client
 
 
 @pytest.fixture
@@ -44,9 +100,7 @@ def make_client(write_config: Callable[[str], Settings]) -> ClientFactory:
 
     @asynccontextmanager
     async def _make(config_yaml: str) -> AsyncIterator[AsyncClient]:
-        app = create_app(write_config(config_yaml))
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://gateway") as http_client:
+        async with gateway_client(write_config(config_yaml)) as http_client:
             yield http_client
 
     return _make

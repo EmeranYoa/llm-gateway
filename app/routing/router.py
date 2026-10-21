@@ -5,6 +5,8 @@ import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
+from http import HTTPStatus
 from typing import Any
 
 from app.config import Target
@@ -15,6 +17,7 @@ from app.providers.base import (
     ProviderError,
     ProviderResponse,
     ProviderTimeout,
+    RateLimited,
     TargetMisconfigured,
 )
 
@@ -41,7 +44,7 @@ class AllTargetsFailed(Exception):
     """Every target of the alias was tried and none of them answered."""
 
     def __init__(self, alias: str, failures: list[tuple[Target, ProviderError]]) -> None:
-        super().__init__(f"All targets of alias '{alias}' failed: {_describe(failures)}")
+        super().__init__(f"All targets of alias '{alias}' failed: {_describe_failures(failures)}")
         self.alias = alias
 
 
@@ -53,7 +56,7 @@ class DeadlineExceeded(Exception):
     ) -> None:
         super().__init__(
             f"Alias '{alias}' could not be served within the gateway deadline of {deadline:g} s: "
-            f"{_describe(failures)}"
+            f"{_describe_failures(failures)}"
         )
         self.alias = alias
 
@@ -73,6 +76,75 @@ class TargetRejectedRequest(Exception):
         super().__init__(f"{target.name}: {error.message}")
         self.target = target
         self.error = error
+
+
+class Outcome(StrEnum):
+    """What happened to one examined target."""
+
+    SUCCESS = "success"
+    RATE_LIMITED = "rate_limited"
+    UNAVAILABLE = "unavailable"
+    TIMEOUT = "timeout"
+    MISCONFIGURED = "misconfigured"
+    INVALID_REQUEST = "invalid_request"
+    CONTEXT_TOO_LARGE = "context_too_large"
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """One target examined for a request, and its outcome. The usage log stores one row each."""
+
+    target: Target
+    outcome: Outcome
+    latency_ms: int | None = None
+    status_code: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    error_message: str | None = None
+
+    @classmethod
+    def failed(cls, target: Target, error: ProviderError, latency_ms: int) -> "Attempt":
+        """Build the attempt of a provider call that raised `error`."""
+        return cls(
+            target,
+            _outcome_of(error),
+            latency_ms=latency_ms,
+            status_code=error.status_code,
+            error_message=_describe(error),
+        )
+
+
+def _outcome_of(error: ProviderError) -> Outcome:
+    """Map a common provider error type to its usage log outcome."""
+    match error:
+        case RateLimited():
+            return Outcome.RATE_LIMITED
+        case ProviderTimeout():
+            return Outcome.TIMEOUT
+        case TargetMisconfigured():
+            return Outcome.MISCONFIGURED
+        case ContextTooLarge():
+            return Outcome.CONTEXT_TOO_LARGE
+        case InvalidRequest():
+            return Outcome.INVALID_REQUEST
+        case _:
+            return Outcome.UNAVAILABLE
+
+
+def _describe(error: ProviderError) -> str:
+    """Describe a provider error without any text that may come from the prompt.
+
+    The upstream message of a client error is left out: some providers quote
+    the invalid input in it. Other error messages are written by the gateway.
+    """
+    if not isinstance(error, InvalidRequest):
+        return str(error)
+    details = [f"HTTP {error.status_code}", f"type: {error.error_type}"]
+    if error.code:
+        details.append(f"code: {error.code}")
+    if error.param:
+        details.append(f"param: {error.param}")
+    return f"invalid request ({', '.join(details)})"
 
 
 @dataclass(frozen=True)
@@ -99,7 +171,9 @@ class Router:
         self._deadline = deadline
         self._min_attempt_time = min_attempt_time
 
-    async def route(self, alias: str, body: dict[str, Any]) -> RoutedResponse:
+    async def route(
+        self, alias: str, body: dict[str, Any], *, attempts: list[Attempt]
+    ) -> RoutedResponse:
         """Send the request to the targets of `alias` in order, until one answers.
 
         An `InvalidRequest` stops the loop: the client request is wrong, and
@@ -109,6 +183,9 @@ class Router:
         The whole request must finish within the gateway deadline. Each attempt
         gets `min(model timeout, remaining deadline)`, and no new attempt starts
         when less than `min_attempt_time` remains.
+
+        Every examined target is appended to `attempts`, whether routing succeeds
+        or raises, so the caller can log the full routing path in both cases.
 
         Raises:
             UnknownAlias: the alias is not defined.
@@ -131,11 +208,14 @@ class Router:
                 raise DeadlineExceeded(alias, self._deadline, failures)
             provider = self._providers[target.provider.name]
             attempt_timeout = min(target.limits.timeout, remaining)
+            started = time.perf_counter()
             try:
                 response = await _call_with_timeout(provider, target.model, body, attempt_timeout)
             except InvalidRequest as error:
+                attempts.append(Attempt.failed(target, error, _elapsed_ms(started)))
                 raise TargetRejectedRequest(target, error) from error
             except ProviderError as error:
+                attempts.append(Attempt.failed(target, error, _elapsed_ms(started)))
                 failures.append((target, error))
                 if isinstance(error, ProviderTimeout) and attempt_timeout < target.limits.timeout:
                     # The deadline cut this attempt short, not the model's own timeout.
@@ -147,6 +227,17 @@ class Router:
                         error.status_code,
                     )
                 continue
+            attempts.append(
+                Attempt(
+                    target,
+                    Outcome.SUCCESS,
+                    latency_ms=_elapsed_ms(started),
+                    # Providers only return a response for a successful upstream call.
+                    status_code=HTTPStatus.OK,
+                    prompt_tokens=response.prompt_tokens,
+                    completion_tokens=response.completion_tokens,
+                )
+            )
             return RoutedResponse(
                 body={**response.body, "model": target.model}, target=target, fallbacks=index
             )
@@ -170,5 +261,9 @@ async def _call_with_timeout(
         raise ProviderTimeout() from error
 
 
-def _describe(failures: list[tuple[Target, ProviderError]]) -> str:
+def _describe_failures(failures: list[tuple[Target, ProviderError]]) -> str:
     return "; ".join(f"{target.name}: {error}" for target, error in failures)
+
+
+def _elapsed_ms(started: float) -> int:
+    return round((time.perf_counter() - started) * 1000)

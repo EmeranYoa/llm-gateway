@@ -57,13 +57,21 @@ class OpenAICompatibleProvider(Provider):
         if response.status_code in (401, 403, 404):
             raise TargetMisconfigured(response.status_code)
         if response.status_code >= 500:
-            raise ProviderUnavailable(f"HTTP {response.status_code}")
+            raise ProviderUnavailable(f"HTTP {response.status_code}", response.status_code)
         if response.status_code >= 400:
             error = _invalid_request(response)
             if _is_context_too_large(error):
-                raise ContextTooLarge() from error
+                raise ContextTooLarge(error.status_code) from error
             raise error
-        return ProviderResponse(body=response.json())
+        body = response.json()
+        usage = body.get("usage") if isinstance(body, dict) else None
+        if not isinstance(usage, dict):
+            usage = {}
+        return ProviderResponse(
+            body=body,
+            prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
+            completion_tokens=_int_or_none(usage.get("completion_tokens")),
+        )
 
     def _auth_headers(self) -> dict[str, str]:
         if self._settings.api_key is None:
@@ -111,3 +119,8 @@ def _is_context_too_large(error: InvalidRequest) -> bool:
 def _text_or_none(value: object) -> str | None:
     """Keep only string values: some providers use numbers where OpenAI uses strings."""
     return value if isinstance(value, str) and value else None
+
+
+def _int_or_none(value: object) -> int | None:
+    """Keep only integer values (`bool` is an `int` subclass in Python, so it is excluded)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None

@@ -19,6 +19,26 @@ class ChatCompletionRequest(BaseModel):
     messages: list[dict[str, Any]] = Field(min_length=1)
     stream: bool = False
 
+    def prompt_chars(self) -> int:
+        """Size of the prompt in characters, so it can be logged instead of the prompt.
+
+        Counts every string value the model reads in `messages`, `tools` and
+        `response_format`. JSON keys and punctuation are not counted.
+        """
+        extra = self.model_extra or {}
+        return _count_chars([self.messages, extra.get("tools"), extra.get("response_format")])
+
+
+def _count_chars(value: object) -> int:
+    """Sum the lengths of every string found in nested lists and dicts."""
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(_count_chars(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_count_chars(item) for item in value)
+    return 0
+
 
 class ErrorDetail(BaseModel):
     message: str

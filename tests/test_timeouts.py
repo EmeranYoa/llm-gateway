@@ -12,7 +12,7 @@ import pytest
 import respx
 from httpx import AsyncClient
 
-from tests.conftest import ClientFactory
+from tests.conftest import ClientFactory, FetchUsageRows
 from tests.upstream import (
     CHAT_REQUEST,
     GEMINI_KEY,
@@ -174,3 +174,22 @@ async def test_no_new_attempt_starts_when_too_little_time_remains(
         "groq/llama-3.3-70b-versatile: timeout"
     )
     assert not gemini.called
+
+
+async def test_timed_out_attempt_is_logged_with_timeout_outcome(
+    timeout_client: TimeoutClientFactory,
+    respx_mock: respx.MockRouter,
+    usage_rows: FetchUsageRows,
+) -> None:
+    respx_mock.post(GROQ_URL).mock(side_effect=slow_upstream(1.0, "llama-3.3-70b-versatile"))
+    respx_mock.post(GEMINI_URL).respond(json=completion_body("gemini-2.5-flash"))
+
+    async with timeout_client(
+        deadline=5, min_attempt_time=0.01, groq_timeout=0.05, gemini_timeout=5
+    ) as client:
+        await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+
+    assert [(row["provider"], row["outcome"]) for row in await usage_rows()] == [
+        ("groq", "timeout"),
+        ("gemini", "success"),
+    ]
