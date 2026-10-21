@@ -8,7 +8,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import GatewayConfig
-from app.routing.router import NoEnabledTarget, Router, UnknownAlias
+from app.routing.router import (
+    AllTargetsFailed,
+    NoEnabledTarget,
+    RequestTooLarge,
+    Router,
+    TargetRejectedRequest,
+    UnknownAlias,
+)
 from app.schemas import ChatCompletionRequest, ErrorBody, ErrorDetail
 
 router = APIRouter()
@@ -100,6 +107,25 @@ async def chat_completions(
             "api_error",
             code="no_enabled_target",
         )
+    except TargetRejectedRequest as exc:
+        return error_response(
+            exc.error.status_code,
+            str(exc),
+            exc.error.error_type,
+            param=exc.error.param,
+            code=exc.error.code,
+        )
+    except RequestTooLarge as exc:
+        return error_response(
+            400,
+            f"The request is too large for every target of alias '{exc.alias}'. "
+            "Reduce the prompt or max_tokens.",
+            "invalid_request_error",
+            param="messages",
+            code="context_length_exceeded",
+        )
+    except AllTargetsFailed as exc:
+        return error_response(503, str(exc), "api_error", code="all_targets_failed")
     response.headers["X-Gateway-Provider"] = routed.target.provider.name
     response.headers["X-Gateway-Model"] = routed.target.model
     response.headers["X-Gateway-Fallbacks"] = str(routed.fallbacks)

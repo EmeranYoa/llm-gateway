@@ -10,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.config import Settings
 from app.main import create_app
-from tests.upstream import CHAT_CONFIG, GROQ_KEY
+from tests.upstream import CHAT_CONFIG, FAILOVER_CONFIG, GEMINI_KEY, GROQ_KEY
 
 MINIMAL_CONFIG = """
 providers:
@@ -70,4 +70,15 @@ async def chat_client(
     monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     async with make_client(CHAT_CONFIG) as http_client:
+        yield http_client
+
+
+@pytest.fixture
+async def failover_client(
+    make_client: ClientFactory, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[AsyncClient]:
+    """HTTP client for a gateway routing `chat-fast` to Groq, then Gemini, then Ollama."""
+    monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
+    monkeypatch.setenv("GEMINI_API_KEY", GEMINI_KEY)
+    async with make_client(FAILOVER_CONFIG) as http_client:
         yield http_client
