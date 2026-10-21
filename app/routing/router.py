@@ -115,6 +115,8 @@ class Attempt:
     completion_tokens: int | None = None
     error_message: str | None = None
     estimated_tokens: int | None = None
+    degraded: bool = False
+    """True when the call was made without Redis checks (degraded mode)."""
 
     @classmethod
     def skipped(
@@ -125,7 +127,11 @@ class Attempt:
 
     @classmethod
     def succeeded(
-        cls, target: Target, response: ProviderResponse, latency_ms: int, estimated_tokens: int
+        cls,
+        target: Target,
+        response: ProviderResponse,
+        latency_ms: int,
+        reservation: Reservation,
     ) -> "Attempt":
         """Build the attempt of a successful provider call."""
         return cls(
@@ -136,12 +142,13 @@ class Attempt:
             status_code=HTTPStatus.OK,
             prompt_tokens=response.prompt_tokens,
             completion_tokens=response.completion_tokens,
-            estimated_tokens=estimated_tokens,
+            estimated_tokens=reservation.tokens,
+            degraded=reservation.degraded,
         )
 
     @classmethod
     def failed(
-        cls, target: Target, error: ProviderError, latency_ms: int, estimated_tokens: int
+        cls, target: Target, error: ProviderError, latency_ms: int, reservation: Reservation
     ) -> "Attempt":
         """Build the attempt of a provider call that raised `error`."""
         return cls(
@@ -150,7 +157,8 @@ class Attempt:
             latency_ms=latency_ms,
             status_code=error.status_code,
             error_message=_describe(error),
-            estimated_tokens=estimated_tokens,
+            estimated_tokens=reservation.tokens,
+            degraded=reservation.degraded,
         )
 
 
@@ -264,6 +272,8 @@ class Router:
         prompt_tokens = estimate_prompt_tokens(body)
         failures: list[tuple[Target, ProviderError | Refusal]] = []
         waits: list[float] = []
+        # Once Redis has failed for this request, do not wait for it again.
+        redis_down = False
         for index, target in enumerate(targets):
             remaining = deadline_at - time.monotonic()
             if remaining < self._min_attempt_time:
@@ -281,7 +291,11 @@ class Router:
                 prompt_tokens, body, self._default_completion_tokens, tpm
             )
             attempt_timeout = min(target.limits.timeout, remaining)
-            acquired = await self._gate.acquire(target, estimated_tokens, attempt_timeout)
+            if redis_down:
+                acquired: Reservation | Refusal = Reservation.without_redis(estimated_tokens)
+            else:
+                acquired = await self._gate.acquire(target, estimated_tokens, attempt_timeout)
+                redis_down = isinstance(acquired, Reservation) and acquired.degraded
             if isinstance(acquired, Refusal):
                 attempts.append(
                     Attempt.skipped(
@@ -296,15 +310,11 @@ class Router:
             try:
                 response = await _call_with_timeout(provider, target.model, body, attempt_timeout)
             except InvalidRequest as error:
-                attempts.append(
-                    Attempt.failed(target, error, _elapsed_ms(started), estimated_tokens)
-                )
+                attempts.append(Attempt.failed(target, error, _elapsed_ms(started), acquired))
                 await self._record_failure(target, acquired, error)
                 raise TargetRejectedRequest(target, error) from error
             except ProviderError as error:
-                attempts.append(
-                    Attempt.failed(target, error, _elapsed_ms(started), estimated_tokens)
-                )
+                attempts.append(Attempt.failed(target, error, _elapsed_ms(started), acquired))
                 failures.append((target, error))
                 cooldown = await self._record_failure(target, acquired, error)
                 if cooldown is not None:
@@ -314,9 +324,7 @@ class Router:
                     raise DeadlineExceeded(alias, self._deadline, failures) from error
                 continue
             await self._gate.record_success(target, acquired, response.total_tokens)
-            attempts.append(
-                Attempt.succeeded(target, response, _elapsed_ms(started), estimated_tokens)
-            )
+            attempts.append(Attempt.succeeded(target, response, _elapsed_ms(started), acquired))
             return RoutedResponse(
                 body={**response.body, "model": target.model}, target=target, fallbacks=index
             )

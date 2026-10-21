@@ -1,5 +1,6 @@
 """Shared test fixtures."""
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -152,3 +153,22 @@ async def failover_client(
     monkeypatch.setenv("GEMINI_API_KEY", GEMINI_KEY)
     async with make_client(FAILOVER_CONFIG) as http_client:
         yield http_client
+
+
+@pytest.fixture
+async def silent_server() -> AsyncIterator[int]:
+    """A TCP server that accepts connections but never answers, like a hung database.
+
+    Yields its port.
+    """
+    connections: list[asyncio.StreamWriter] = []
+
+    async def accept_and_stay_silent(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        connections.append(writer)
+
+    server = await asyncio.start_server(accept_and_stay_silent, "127.0.0.1", 0)
+    yield server.sockets[0].getsockname()[1]
+    for writer in connections:
+        writer.close()
+    server.close()
+    await server.wait_closed()

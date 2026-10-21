@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     database_timeout: float = Field(default=5.0, gt=0)
     # Default: the Redis started by docker compose, seen from the host.
     redis_url: str = "redis://localhost:6379/0"
+    # Seconds to wait for Redis before routing without it (degraded mode, ADR 0002).
+    redis_timeout: float = Field(default=0.25, gt=0)
 
 
 # --- File format (what `gateway.yaml` looks like) ---

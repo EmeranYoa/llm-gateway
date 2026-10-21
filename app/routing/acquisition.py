@@ -9,14 +9,18 @@ The state lives in Redis so that several gateway instances share it.
 """
 
 import datetime as dt
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.config import BreakerSection, CooldownSection, Target
 from app.routing.quotas import quota_day
+
+logger = logging.getLogger(__name__)
 
 _LUA_DIR = Path(__file__).parent / "lua"
 
@@ -32,6 +36,13 @@ class Reservation:
     """Estimated tokens reserved in the TPM window."""
     is_trial: bool = False
     """True when this call is the single trial call of a half-open breaker."""
+    degraded: bool = False
+    """True when Redis was unavailable: nothing was checked or reserved (ADR 0002)."""
+
+    @classmethod
+    def without_redis(cls, tokens: int) -> "Reservation":
+        """A reservation for a call made while Redis is unavailable."""
+        return cls(id=uuid4().hex, tokens=tokens, degraded=True)
 
 
 @dataclass(frozen=True)
@@ -53,10 +64,18 @@ class Refusal:
 
 class TargetGate:
     def __init__(self, redis: Redis, cooldown: CooldownSection, breaker: BreakerSection) -> None:
+        self._redis = redis
         self._cooldown = cooldown
         self._breaker = breaker
         self._acquire_script = redis.register_script(_lua("acquire_target.lua"))
         self._record_script = redis.register_script(_lua("record_outcome.lua"))
+
+    async def is_available(self) -> bool:
+        """Tell whether Redis answers, for the health check."""
+        try:
+            return bool(await self._redis.ping())
+        except RedisError:
+            return False
 
     async def acquire(
         self, target: Target, estimated_tokens: int, attempt_timeout: float
@@ -66,7 +85,22 @@ class TargetGate:
         When the breaker is half-open, the reservation may be its single trial
         call. The trial slot is held at most `attempt_timeout` seconds, so it
         frees itself if this gateway instance dies during the call.
+
+        When Redis is unavailable, the call is allowed without any check
+        (fail open, ADR 0002) and the reservation is marked `degraded`.
         """
+        try:
+            return await self._acquire(target, estimated_tokens, attempt_timeout)
+        except RedisError as error:
+            logger.warning(
+                "Redis is unavailable (%s): routing without cooldown, breaker or quota checks",
+                type(error).__name__,
+            )
+            return Reservation.without_redis(estimated_tokens)
+
+    async def _acquire(
+        self, target: Target, estimated_tokens: int, attempt_timeout: float
+    ) -> Reservation | Refusal:
         reservation_id = uuid4().hex
         limits = target.limits
         day, next_reset = quota_day(target.provider.daily_reset, dt.datetime.now(dt.UTC))
@@ -111,12 +145,13 @@ class TargetGate:
 
     async def record_rate_limited(
         self, target: Target, reservation: Reservation, retry_after: float | None
-    ) -> float:
+    ) -> float | None:
         """Release the tokens and put `target` in cooldown after a 429.
 
         The cooldown is `retry_after` when the provider gave one. Otherwise it is
         progressive: it doubles with each consecutive 429, up to the configured max.
-        Neutral for the breaker. Returns the cooldown in seconds.
+        Neutral for the breaker. Returns the cooldown in seconds, or None when
+        Redis is unavailable.
         """
         return await self._record(
             target,
@@ -127,10 +162,11 @@ class TargetGate:
             retry_ms=-1 if retry_after is None else _ms(retry_after),
         )
 
-    async def record_misconfigured(self, target: Target, reservation: Reservation) -> float:
+    async def record_misconfigured(self, target: Target, reservation: Reservation) -> float | None:
         """Release the tokens and put `target` in the long misconfiguration cooldown.
 
-        Neutral for the breaker. Returns the cooldown in seconds.
+        Neutral for the breaker. Returns the cooldown in seconds, or None when
+        Redis is unavailable.
         """
         return await self._record(
             target, reservation, cooldown="misconfigured", tokens="release", breaker="neutral"
@@ -164,7 +200,40 @@ class TargetGate:
         breaker: str,
         retry_ms: int = -1,
         used_tokens: int = -1,
-    ) -> float:
+    ) -> float | None:
+        """Run `record_outcome.lua`. Returns the cooldown in seconds, or None without Redis."""
+        if reservation.degraded:
+            return None
+        try:
+            cooldown_ms = await self._run_record_script(
+                target,
+                reservation,
+                cooldown=cooldown,
+                tokens=tokens,
+                breaker=breaker,
+                retry_ms=retry_ms,
+                used_tokens=used_tokens,
+            )
+        except RedisError as error:
+            logger.warning(
+                "Redis is unavailable (%s): the outcome of a call to %s was not recorded",
+                type(error).__name__,
+                target.name,
+            )
+            return None
+        return int(cooldown_ms) / 1000
+
+    async def _run_record_script(
+        self,
+        target: Target,
+        reservation: Reservation,
+        *,
+        cooldown: str,
+        tokens: str,
+        breaker: str,
+        retry_ms: int,
+        used_tokens: int,
+    ) -> int:
         # The request itself always stays counted: the provider may have counted it too.
         cooldown_ms = await self._record_script(
             keys=[
@@ -190,7 +259,7 @@ class TargetGate:
                 _ms(self._breaker.open),
             ],
         )
-        return int(cooldown_ms) / 1000
+        return int(cooldown_ms)
 
 
 def _key(kind: str, target: Target) -> str:

@@ -3,7 +3,7 @@
 import asyncio
 import datetime as dt
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -278,25 +278,6 @@ async def test_client_gets_its_response_when_postgresql_is_down(
     request_id = response.headers["X-Gateway-Request-Id"]
     assert f"could not write the usage log of request {request_id}" in caplog.messages
     assert prompt not in caplog.text
-
-
-@pytest.fixture
-async def silent_server() -> AsyncIterator[int]:
-    """A TCP server that accepts connections but never answers, like a hung database.
-
-    Yields its port.
-    """
-    connections: list[asyncio.StreamWriter] = []
-
-    async def accept_and_stay_silent(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        connections.append(writer)
-
-    server = await asyncio.start_server(accept_and_stay_silent, "127.0.0.1", 0)
-    yield server.sockets[0].getsockname()[1]
-    for writer in connections:
-        writer.close()
-    server.close()
-    await server.wait_closed()
 
 
 async def test_usage_log_write_gives_up_when_postgres_does_not_answer(

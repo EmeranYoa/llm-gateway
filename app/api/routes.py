@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import GatewayConfig
+from app.routing.acquisition import TargetGate
 from app.routing.router import (
     AllTargetsFailed,
     Attempt,
@@ -37,16 +38,30 @@ def get_router(request: Request) -> Router:
     return cast(Router, request.app.state.router)
 
 
+def get_gate(request: Request) -> TargetGate:
+    """Return the shared target state (Redis) built at startup."""
+    return cast(TargetGate, request.app.state.gate)
+
+
 def get_usage_log(request: Request) -> UsageLog:
     """Return the usage log built at startup."""
     return cast(UsageLog, request.app.state.usage_log)
 
 
 @router.get("/health")
-async def health(config: Annotated[GatewayConfig, Depends(get_config)]) -> dict[str, Any]:
-    """Report that the gateway is up and which providers are usable."""
+async def health(
+    config: Annotated[GatewayConfig, Depends(get_config)],
+    gate: Annotated[TargetGate, Depends(get_gate)],
+) -> dict[str, Any]:
+    """Report that the gateway is up, whether Redis answers, and which providers are usable.
+
+    Without Redis the gateway still serves requests, without cooldown, breaker
+    or quota checks: its status is then "degraded" (ADR 0002).
+    """
+    redis_up = await gate.is_available()
     return {
-        "status": "ok",
+        "status": "ok" if redis_up else "degraded",
+        "redis": "up" if redis_up else "down",
         "providers": {
             "enabled": list(config.enabled_providers),
             "disabled": list(config.disabled_providers),

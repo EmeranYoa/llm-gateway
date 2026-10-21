@@ -85,6 +85,7 @@ class UsageLog:
                 "latency_ms": attempt.latency_ms,
                 "prompt_chars": prompt_chars,
                 "estimated_tokens": attempt.estimated_tokens,
+                "degraded": attempt.degraded,
                 "prompt_tokens": attempt.prompt_tokens,
                 "completion_tokens": attempt.completion_tokens,
                 "error_message": _cut(attempt.error_message),
