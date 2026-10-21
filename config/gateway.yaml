@@ -1,12 +1,11 @@
 # Gateway configuration: providers, their models, and routes (aliases).
 #
 # Limits, timeout and daily_reset belong to the model or provider, never to a route.
-# Model names, limits and reset times below are examples: free tiers change often,
-# check each provider's documentation before relying on them.
+# Free-tier limits below were checked on the providers' documentation on 2026-10-21.
+# They change often: check them again before relying on them.
 
 gateway:
   deadline: 60 # seconds, for the whole request including failovers
-  min_attempt_time: 1 # seconds; no new attempt starts when less time remains before the deadline
   default_completion_tokens: 512 # used to estimate tokens when max_tokens is missing
   cooldown: # seconds a target is skipped after some errors
     initial: 60 # after a 429 without retry delay; doubles on each 429 in a row
@@ -18,26 +17,57 @@ gateway:
     open: 30 # seconds it stays open before a single trial call is let through
 
 providers:
+  # https://console.groq.com/docs/rate-limits (free plan)
   groq:
     base_url: https://api.groq.com/openai/v1
     api_key_env: GROQ_API_KEY
+    # Groq documents no fixed daily reset time; its rate-limit headers and 429
+    # responses drive the cooldown when this approximation is off.
     daily_reset: { time: "00:00", timezone: "UTC" }
     models:
-      llama-3.3-70b-versatile: { rpm: 30, tpm: 6000, rpd: 1000, timeout: 30 }
+      openai/gpt-oss-120b: { rpm: 30, tpm: 8000, rpd: 1000, timeout: 30 }
+      openai/gpt-oss-20b: { rpm: 30, tpm: 8000, rpd: 1000, timeout: 30 }
 
+  # https://ai.google.dev/gemini-api/docs/rate-limits
   gemini:
     base_url: https://generativelanguage.googleapis.com/v1beta/openai
     api_key_env: GEMINI_API_KEY
-    daily_reset: { time: "00:00", timezone: "America/Los_Angeles" }
+    daily_reset: { time: "00:00", timezone: "America/Los_Angeles" } # midnight Pacific time
     models:
+      # Google no longer publishes free-tier numbers: read the limits of your
+      # project in Google AI Studio and put them here. These are conservative guesses.
       gemini-2.5-flash: { rpm: 10, rpd: 250 }
 
+  # https://openrouter.ai/docs/api/reference/limits (":free" models)
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    daily_reset: { time: "00:00", timezone: "UTC" }
+    models:
+      # 50 requests per day for the whole account (1000 after buying 10 credits).
+      "google/gemma-4-31b-it:free": { rpm: 20, rpd: 50 }
+
+  # Optional local model: an Ollama server you run yourself on the host machine
+  # (https://ollama.com), with `ollama pull llama3.2:3b`. Without it, this target
+  # simply fails over.
   ollama:
-    base_url: http://ollama:11434/v1
+    base_url: http://host.docker.internal:11434/v1
     api_key_env: null
     models:
       "llama3.2:3b": { timeout: 120 } # last resort, no limits
 
 routes:
   chat-fast:
-    [groq/llama-3.3-70b-versatile, gemini/gemini-2.5-flash, ollama/llama3.2:3b]
+    [
+      groq/openai/gpt-oss-20b,
+      gemini/gemini-2.5-flash,
+      openrouter/google/gemma-4-31b-it:free,
+      ollama/llama3.2:3b,
+    ]
+  chat-smart:
+    [
+      groq/openai/gpt-oss-120b,
+      gemini/gemini-2.5-flash,
+      openrouter/google/gemma-4-31b-it:free,
+      ollama/llama3.2:3b,
+    ]
