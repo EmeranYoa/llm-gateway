@@ -19,6 +19,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "mypy",
+    "openai>=3.36.0",
     "pytest",
     "pytest-asyncio",
     "respx",
