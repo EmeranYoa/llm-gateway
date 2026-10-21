@@ -27,7 +27,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     config = load_config(settings.gateway_config_path, os.environ)
     http_client = httpx.AsyncClient()
     # The engine connects lazily: the gateway starts even when PostgreSQL is down.
-    database_engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    database_engine = create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        connect_args={
+            "timeout": settings.database_timeout,
+            "command_timeout": settings.database_timeout,
+        },
+    )
 
     providers: dict[str, Provider] = {}
     for targets in config.routes.values():

@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     gateway_config_path: Path = Path("config/gateway.yaml")
     # Default: the PostgreSQL started by docker compose, seen from the host.
     database_url: str = "postgresql+asyncpg://gateway:gateway@localhost:5432/gateway"
+    # Seconds to wait for PostgreSQL to connect or answer a query. A usage log
+    # write gives up after that, instead of hanging when the database is stuck.
+    database_timeout: float = Field(default=5.0, gt=0)
 
 
 # --- File format (what `gateway.yaml` looks like) ---
