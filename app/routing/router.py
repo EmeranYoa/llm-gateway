@@ -20,6 +20,7 @@ from app.providers.base import (
     RateLimited,
     TargetMisconfigured,
 )
+from app.routing.acquisition import Refusal, TargetGate
 
 logger = logging.getLogger(__name__)
 
@@ -43,16 +44,23 @@ class NoEnabledTarget(Exception):
 class AllTargetsFailed(Exception):
     """Every target of the alias was tried and none of them answered."""
 
-    def __init__(self, alias: str, failures: list[tuple[Target, ProviderError]]) -> None:
+    def __init__(
+        self,
+        alias: str,
+        failures: list[tuple[Target, ProviderError | Refusal]],
+        retry_after: float | None,
+    ) -> None:
         super().__init__(f"All targets of alias '{alias}' failed: {_describe_failures(failures)}")
         self.alias = alias
+        self.retry_after = retry_after
+        """Smallest known wait before a target can be called again, or None if unknown."""
 
 
 class DeadlineExceeded(Exception):
     """The gateway deadline ran out before a target answered."""
 
     def __init__(
-        self, alias: str, deadline: float, failures: list[tuple[Target, ProviderError]]
+        self, alias: str, deadline: float, failures: list[tuple[Target, ProviderError | Refusal]]
     ) -> None:
         super().__init__(
             f"Alias '{alias}' could not be served within the gateway deadline of {deadline:g} s: "
@@ -88,6 +96,7 @@ class Outcome(StrEnum):
     MISCONFIGURED = "misconfigured"
     INVALID_REQUEST = "invalid_request"
     CONTEXT_TOO_LARGE = "context_too_large"
+    SKIPPED_COOLDOWN = "skipped_cooldown"
 
 
 @dataclass(frozen=True)
@@ -162,12 +171,14 @@ class Router:
         self,
         routes: Mapping[str, tuple[Target, ...]],
         providers: Mapping[str, Provider],
+        gate: TargetGate,
         *,
         deadline: float,
         min_attempt_time: float,
     ) -> None:
         self._routes = routes
         self._providers = providers
+        self._gate = gate
         self._deadline = deadline
         self._min_attempt_time = min_attempt_time
 
@@ -176,9 +187,11 @@ class Router:
     ) -> RoutedResponse:
         """Send the request to the targets of `alias` in order, until one answers.
 
-        An `InvalidRequest` stops the loop: the client request is wrong, and
-        every other target would refuse it too. Any other provider error moves
-        on to the next target.
+        A target that `TargetGate.acquire` refuses (for example in cooldown) is
+        skipped without a call. An `InvalidRequest` stops the loop: the client
+        request is wrong, and every other target would refuse it too. Any other
+        provider error moves on to the next target. A 429 or a misconfiguration
+        error puts the target in cooldown for the next requests.
 
         The whole request must finish within the gateway deadline. Each attempt
         gets `min(model timeout, remaining deadline)`, and no new attempt starts
@@ -193,7 +206,8 @@ class Router:
             TargetRejectedRequest: a target refused the client request.
             DeadlineExceeded: the deadline ran out before a target answered.
             RequestTooLarge: the request is too large for every target.
-            AllTargetsFailed: every target failed for another reason.
+            AllTargetsFailed: every target failed or was skipped for another reason.
+                Its `retry_after` is the smallest known wait among those targets.
         """
         targets = self._routes.get(alias)
         if targets is None:
@@ -201,11 +215,20 @@ class Router:
         if not targets:
             raise NoEnabledTarget(alias)
         deadline_at = time.monotonic() + self._deadline
-        failures: list[tuple[Target, ProviderError]] = []
+        failures: list[tuple[Target, ProviderError | Refusal]] = []
+        waits: list[float] = []
         for index, target in enumerate(targets):
             remaining = deadline_at - time.monotonic()
             if remaining < self._min_attempt_time:
                 raise DeadlineExceeded(alias, self._deadline, failures)
+            refusal = await self._gate.acquire(target)
+            if refusal is not None:
+                attempts.append(
+                    Attempt(target, Outcome.SKIPPED_COOLDOWN, error_message=str(refusal))
+                )
+                failures.append((target, refusal))
+                waits.append(refusal.wait_seconds)
+                continue
             provider = self._providers[target.provider.name]
             attempt_timeout = min(target.limits.timeout, remaining)
             started = time.perf_counter()
@@ -217,16 +240,14 @@ class Router:
             except ProviderError as error:
                 attempts.append(Attempt.failed(target, error, _elapsed_ms(started)))
                 failures.append((target, error))
+                cooldown = await self._record_failure(target, error)
+                if cooldown is not None:
+                    waits.append(cooldown)
                 if isinstance(error, ProviderTimeout) and attempt_timeout < target.limits.timeout:
                     # The deadline cut this attempt short, not the model's own timeout.
                     raise DeadlineExceeded(alias, self._deadline, failures) from error
-                if isinstance(error, TargetMisconfigured):
-                    logger.error(
-                        "target %s is misconfigured (HTTP %s): check its API key and model name",
-                        target.name,
-                        error.status_code,
-                    )
                 continue
+            await self._gate.record_success(target)
             attempts.append(
                 Attempt(
                     target,
@@ -243,7 +264,23 @@ class Router:
             )
         if all(isinstance(error, ContextTooLarge) for _, error in failures):
             raise RequestTooLarge(alias)
-        raise AllTargetsFailed(alias, failures)
+        raise AllTargetsFailed(alias, failures, retry_after=min(waits, default=None))
+
+    async def _record_failure(self, target: Target, error: ProviderError) -> float | None:
+        """Update the shared state of `target` after a failed call.
+
+        Returns the cooldown the target is now in, in seconds, or None.
+        """
+        if isinstance(error, RateLimited):
+            return await self._gate.record_rate_limited(target, error.retry_after)
+        if isinstance(error, TargetMisconfigured):
+            logger.error(
+                "target %s is misconfigured (HTTP %s): check its API key and model name",
+                target.name,
+                error.status_code,
+            )
+            return await self._gate.record_misconfigured(target)
+        return None
 
 
 async def _call_with_timeout(
@@ -261,7 +298,7 @@ async def _call_with_timeout(
         raise ProviderTimeout() from error
 
 
-def _describe_failures(failures: list[tuple[Target, ProviderError]]) -> str:
+def _describe_failures(failures: list[tuple[Target, ProviderError | Refusal]]) -> str:
     return "; ".join(f"{target.name}: {error}" for target, error in failures)
 
 

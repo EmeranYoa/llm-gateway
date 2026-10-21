@@ -1,6 +1,7 @@
 """HTTP routes of the gateway."""
 
 import datetime as dt
+import math
 from typing import Annotated, Any, cast
 from uuid import uuid4
 
@@ -168,6 +169,10 @@ async def _route(
             code="context_length_exceeded",
         )
     except AllTargetsFailed as exc:
-        return error_response(503, str(exc), "api_error", code="all_targets_failed")
+        response = error_response(503, str(exc), "api_error", code="all_targets_failed")
+        if exc.retry_after is not None:
+            # Whole seconds, rounded up, so the client never comes back too early.
+            response.headers["Retry-After"] = str(max(1, math.ceil(exc.retry_after)))
+        return response
     except DeadlineExceeded as exc:
         return error_response(504, str(exc), "api_error", code="deadline_exceeded")

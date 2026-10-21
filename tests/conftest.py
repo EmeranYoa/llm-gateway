@@ -11,6 +11,7 @@ import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
+from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -54,6 +55,21 @@ def database_url() -> str:
     return url
 
 
+# Tests need a real Redis, because the routing state relies on Lua scripts. Locally:
+#   docker run -d --rm --name gateway-test-redis -p 56379:6379 redis:7.4-alpine
+DEFAULT_TEST_REDIS_URL = "redis://localhost:56379/0"
+
+
+@pytest.fixture
+async def redis_url() -> str:
+    """URL of the test Redis, emptied before each test so no routing state leaks between tests."""
+    url = os.environ.get("TEST_REDIS_URL", DEFAULT_TEST_REDIS_URL)
+    redis = Redis.from_url(url)
+    await redis.flushdb()
+    await redis.aclose()
+    return url
+
+
 @pytest.fixture
 async def usage_rows(database_url: str) -> AsyncIterator[FetchUsageRows]:
     """Empty the `usage_log` table, then return a function that reads its rows in insert order."""
@@ -71,13 +87,13 @@ async def usage_rows(database_url: str) -> AsyncIterator[FetchUsageRows]:
 
 
 @pytest.fixture
-def write_config(tmp_path: Path, database_url: str) -> Callable[[str], Settings]:
-    """Write a gateway.yaml file and return settings that point to it and to the test database."""
+def write_config(tmp_path: Path, database_url: str, redis_url: str) -> Callable[[str], Settings]:
+    """Write a gateway.yaml file and return settings that point to it and to the test stores."""
 
     def _write(config_yaml: str) -> Settings:
         path = tmp_path / "gateway.yaml"
         path.write_text(dedent(config_yaml), encoding="utf-8")
-        return Settings(gateway_config_path=path, database_url=database_url)
+        return Settings(gateway_config_path=path, database_url=database_url, redis_url=redis_url)
 
     return _write
 

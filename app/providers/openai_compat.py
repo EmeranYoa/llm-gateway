@@ -4,6 +4,9 @@ One class covers Groq, Gemini (OpenAI-compatible endpoint), OpenRouter and
 Ollama: only the base URL and the API key change.
 """
 
+import datetime as dt
+import email.utils
+import re
 from typing import Any
 
 import httpx
@@ -30,6 +33,12 @@ _CONTEXT_TOO_LARGE_MARKERS = (
 )
 
 
+# Durations in rate-limit headers, for example "2m59.56s" or "250ms".
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
+_DURATION = re.compile(r"(?:\d+(?:\.\d+)?(?:ms|h|m|s))+")
+_DURATION_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+
+
 class OpenAICompatibleProvider(Provider):
     def __init__(self, settings: ProviderSettings, http_client: httpx.AsyncClient) -> None:
         self._settings = settings
@@ -53,7 +62,7 @@ class OpenAICompatibleProvider(Provider):
         except httpx.TransportError as exc:
             raise ProviderUnavailable(f"network error ({type(exc).__name__})") from exc
         if response.status_code == 429:
-            raise RateLimited(retry_after=None)
+            raise RateLimited(retry_after=_retry_after(response))
         if response.status_code in (401, 403, 404):
             raise TargetMisconfigured(response.status_code)
         if response.status_code >= 500:
@@ -105,6 +114,54 @@ def _invalid_request(response: httpx.Response) -> InvalidRequest:
         error_type=_text_or_none(error.get("type")) or "invalid_request_error",
         param=_text_or_none(error.get("param")),
         code=_text_or_none(error.get("code")),
+    )
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Read how long the provider asks to wait before the next call, in seconds.
+
+    1. `Retry-After`, in seconds or as an HTTP date.
+    2. Otherwise the `x-ratelimit-reset-requests` / `x-ratelimit-reset-tokens`
+       headers (Groq, OpenAI): the reset time of the limit that is used up
+       (its `x-ratelimit-remaining-*` header is 0), or the longest reset time
+       when the headers do not say which limit is used up.
+
+    Returns None when the response gives no usable delay.
+    """
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is not None:
+        return _parse_retry_after(retry_after)
+    resets = {
+        kind: _parse_duration(response.headers.get(f"x-ratelimit-reset-{kind}", ""))
+        for kind in ("requests", "tokens")
+    }
+    used_up = [
+        reset
+        for kind, reset in resets.items()
+        if reset is not None and response.headers.get(f"x-ratelimit-remaining-{kind}") == "0"
+    ]
+    known = used_up or [reset for reset in resets.values() if reset is not None]
+    return max(known, default=None)
+
+
+def _parse_retry_after(value: str) -> float | None:
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        pass
+    try:
+        retry_at = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return max((retry_at - dt.datetime.now(dt.UTC)).total_seconds(), 0.0)
+
+
+def _parse_duration(value: str) -> float | None:
+    """Parse durations such as "2m59.56s", "7.66s", "250ms" or "1h" into seconds."""
+    if not _DURATION.fullmatch(value):
+        return None
+    return sum(
+        float(number) * _DURATION_UNITS[unit] for number, unit in _DURATION_PART.findall(value)
     )
 
 

@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # Seconds to wait for PostgreSQL to connect or answer a query. A usage log
     # write gives up after that, instead of hanging when the database is stuck.
     database_timeout: float = Field(default=5.0, gt=0)
+    # Default: the Redis started by docker compose, seen from the host.
+    redis_url: str = "redis://localhost:6379/0"
 
 
 # --- File format (what `gateway.yaml` looks like) ---
@@ -64,10 +66,28 @@ class ProviderConfig(_FileModel):
     models: dict[str, ModelConfig]
 
 
+class CooldownSection(_FileModel):
+    """How long a target is skipped after a 429 or a misconfiguration error, in seconds."""
+
+    initial: float = Field(default=60.0, gt=0)
+    """First cooldown after a 429 without a retry delay. It doubles on each consecutive 429."""
+    max: float = Field(default=3600.0, gt=0)
+    """Upper bound of the progressive cooldown."""
+    misconfigured: float = Field(default=600.0, gt=0)
+    """Cooldown after a 401, 403 or 404: a bad key or a removed model does not fix itself."""
+
+    @model_validator(mode="after")
+    def _max_not_below_initial(self) -> "CooldownSection":
+        if self.max < self.initial:
+            raise ValueError("cooldown max must not be lower than cooldown initial")
+        return self
+
+
 class GatewaySection(_FileModel):
     deadline: float = Field(default=60.0, gt=0)
     min_attempt_time: float = Field(default=1.0, gt=0)
     default_completion_tokens: int = Field(default=512, gt=0)
+    cooldown: CooldownSection = CooldownSection()
 
     @model_validator(mode="after")
     def _attempts_fit_in_deadline(self) -> "GatewaySection":
@@ -114,6 +134,7 @@ class GatewayConfig:
     min_attempt_time: float
     """No new attempt starts when less than this many seconds remain before the deadline."""
     default_completion_tokens: int
+    cooldown: CooldownSection
     routes: Mapping[str, tuple[Target, ...]]
     enabled_providers: tuple[str, ...]
     disabled_providers: tuple[str, ...]
@@ -133,6 +154,7 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
         deadline=file_config.gateway.deadline,
         min_attempt_time=file_config.gateway.min_attempt_time,
         default_completion_tokens=file_config.gateway.default_completion_tokens,
+        cooldown=file_config.gateway.cooldown,
         routes=_resolve_routes(file_config, providers),
         enabled_providers=tuple(providers),
         disabled_providers=tuple(disabled),

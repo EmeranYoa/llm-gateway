@@ -7,12 +7,14 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.api.routes import router, validation_error_handler
 from app.config import Settings, load_config
 from app.providers.base import Provider
 from app.providers.openai_compat import OpenAICompatibleProvider
+from app.routing.acquisition import TargetGate
 from app.routing.router import Router
 from app.storage.usage import UsageLog
 
@@ -26,6 +28,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     config = load_config(settings.gateway_config_path, os.environ)
     http_client = httpx.AsyncClient()
+    redis_client = Redis.from_url(settings.redis_url)
     # The engine connects lazily: the gateway starts even when PostgreSQL is down.
     database_engine = create_async_engine(
         settings.database_url,
@@ -48,12 +51,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await http_client.aclose()
         await database_engine.dispose()
+        await redis_client.aclose()
 
     app = FastAPI(title="LLM Gateway", version="0.1.0", lifespan=lifespan)
     app.state.config = config
     app.state.router = Router(
         config.routes,
         providers,
+        TargetGate(redis_client, config.cooldown),
         deadline=config.deadline,
         min_attempt_time=config.min_attempt_time,
     )
