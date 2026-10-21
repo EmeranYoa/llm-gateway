@@ -10,8 +10,10 @@ dependencies = [
     "httpx",
     "pydantic>=2",
     "pydantic-settings",
+    "pyyaml>=6.0.3",
     "redis",
     "sqlalchemy[asyncio]>=2",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [dependency-groups]
@@ -21,6 +23,7 @@ dev = [
     "pytest-asyncio",
     "respx",
     "ruff",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.ruff]
