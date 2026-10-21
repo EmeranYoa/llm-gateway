@@ -101,11 +101,23 @@ class CooldownSection(_FileModel):
         return self
 
 
+class BreakerSection(_FileModel):
+    """Circuit breaker settings, shared by every target."""
+
+    failures: int = Field(default=5, gt=0)
+    """Failures (5xx, network error, timeout) within `window` that open the breaker."""
+    window: float = Field(default=60.0, gt=0)
+    """Sliding window, in seconds, in which failures are counted."""
+    open: float = Field(default=30.0, gt=0)
+    """Seconds the breaker stays open before it lets a single trial call through."""
+
+
 class GatewaySection(_FileModel):
     deadline: float = Field(default=60.0, gt=0)
     min_attempt_time: float = Field(default=1.0, gt=0)
     default_completion_tokens: int = Field(default=512, gt=0)
     cooldown: CooldownSection = CooldownSection()
+    breaker: BreakerSection = BreakerSection()
 
     @model_validator(mode="after")
     def _attempts_fit_in_deadline(self) -> "GatewaySection":
@@ -153,6 +165,7 @@ class GatewayConfig:
     """No new attempt starts when less than this many seconds remain before the deadline."""
     default_completion_tokens: int
     cooldown: CooldownSection
+    breaker: BreakerSection
     routes: Mapping[str, tuple[Target, ...]]
     enabled_providers: tuple[str, ...]
     disabled_providers: tuple[str, ...]
@@ -173,6 +186,7 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
         min_attempt_time=file_config.gateway.min_attempt_time,
         default_completion_tokens=file_config.gateway.default_completion_tokens,
         cooldown=file_config.gateway.cooldown,
+        breaker=file_config.gateway.breaker,
         routes=_resolve_routes(file_config, providers),
         enabled_providers=tuple(providers),
         disabled_providers=tuple(disabled),

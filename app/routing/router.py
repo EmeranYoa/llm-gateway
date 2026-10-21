@@ -17,6 +17,7 @@ from app.providers.base import (
     ProviderError,
     ProviderResponse,
     ProviderTimeout,
+    ProviderUnavailable,
     RateLimited,
     TargetMisconfigured,
 )
@@ -98,6 +99,7 @@ class Outcome(StrEnum):
     INVALID_REQUEST = "invalid_request"
     CONTEXT_TOO_LARGE = "context_too_large"
     SKIPPED_COOLDOWN = "skipped_cooldown"
+    SKIPPED_BREAKER = "skipped_breaker"
     SKIPPED_QUOTA = "skipped_quota"
 
 
@@ -150,6 +152,15 @@ class Attempt:
             error_message=_describe(error),
             estimated_tokens=estimated_tokens,
         )
+
+
+def _skip_outcome(refusal: Refusal) -> Outcome:
+    """The usage log outcome of a target that `TargetGate.acquire` refused."""
+    if refusal.reason == "cooldown":
+        return Outcome.SKIPPED_COOLDOWN
+    if refusal.reason == "breaker":
+        return Outcome.SKIPPED_BREAKER
+    return Outcome.SKIPPED_QUOTA
 
 
 def _outcome_of(error: ProviderError) -> Outcome:
@@ -219,8 +230,8 @@ class Router:
         """Send the request to the targets of `alias` in order, until one answers.
 
         Each target is skipped without a call when the prompt alone is larger
-        than its TPM, or when `TargetGate.acquire` refuses it (cooldown, or a
-        full RPM/TPM/RPD quota). Otherwise its quota is reserved, the provider
+        than its TPM, or when `TargetGate.acquire` refuses it (cooldown, open
+        circuit breaker, or a full RPM/TPM/RPD quota). Otherwise its quota is reserved, the provider
         is called, and the reservation is then corrected or released.
 
         An `InvalidRequest` stops the loop: the client request is wrong, and
@@ -269,15 +280,18 @@ class Router:
             estimated_tokens = estimate_call_tokens(
                 prompt_tokens, body, self._default_completion_tokens, tpm
             )
-            acquired = await self._gate.acquire(target, estimated_tokens)
+            attempt_timeout = min(target.limits.timeout, remaining)
+            acquired = await self._gate.acquire(target, estimated_tokens, attempt_timeout)
             if isinstance(acquired, Refusal):
-                outcome = Outcome.SKIPPED_QUOTA if acquired.is_quota else Outcome.SKIPPED_COOLDOWN
-                attempts.append(Attempt.skipped(target, outcome, str(acquired), estimated_tokens))
+                attempts.append(
+                    Attempt.skipped(
+                        target, _skip_outcome(acquired), str(acquired), estimated_tokens
+                    )
+                )
                 failures.append((target, acquired))
                 waits.append(acquired.wait_seconds)
                 continue
             provider = self._providers[target.provider.name]
-            attempt_timeout = min(target.limits.timeout, remaining)
             started = time.perf_counter()
             try:
                 response = await _call_with_timeout(provider, target.model, body, attempt_timeout)
@@ -327,7 +341,12 @@ class Router:
             )
             return await self._gate.record_misconfigured(target, reservation)
         await self._gate.record_failure(
-            target, reservation, keep_tokens=isinstance(error, ProviderTimeout)
+            target,
+            reservation,
+            keep_tokens=isinstance(error, ProviderTimeout),
+            # 5xx, network errors and timeouts: the provider failed. Client errors
+            # (invalid request, context too large) mean the provider worked.
+            provider_failed=isinstance(error, ProviderUnavailable),
         )
         return None
 

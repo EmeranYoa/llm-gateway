@@ -58,7 +58,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.router = Router(
         config.routes,
         providers,
-        TargetGate(redis_client, config.cooldown),
+        TargetGate(redis_client, config.cooldown, config.breaker),
         deadline=config.deadline,
         min_attempt_time=config.min_attempt_time,
         default_completion_tokens=config.default_completion_tokens,

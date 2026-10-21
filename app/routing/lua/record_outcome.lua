@@ -3,7 +3,11 @@
 -- KEYS[1]  cooldown key of the target
 -- KEYS[2]  counter of consecutive 429 responses of the target
 -- KEYS[3]  TPM window of the target (see acquire_target.lua)
--- ARGV[1]  outcome: "success", "rate_limited", "misconfigured" or "failure"
+-- KEYS[4]  breaker failure window: sorted set of failed calls, scored by time in milliseconds
+-- KEYS[5]  breaker "open" key
+-- KEYS[6]  breaker "half-open" marker
+-- KEYS[7]  breaker trial slot
+-- ARGV[1]  cooldown outcome: "success", "rate_limited", "misconfigured" or "none"
 -- ARGV[2]  retry delay in milliseconds given by the provider, or -1 when unknown
 -- ARGV[3]  first progressive cooldown, in milliseconds
 -- ARGV[4]  maximum progressive cooldown, in milliseconds
@@ -12,14 +16,18 @@
 -- ARGV[7]  tokens reserved for the call
 -- ARGV[8]  what to do with the reserved tokens: "correct", "release" or "keep"
 -- ARGV[9]  tokens really used, for "correct" (-1 when the provider did not say)
+-- ARGV[10] breaker result: "success", "failure" or "neutral"
+-- ARGV[11] 1 when the call was the half-open trial, else 0
+-- ARGV[12] breaker: failures within the window that open it
+-- ARGV[13] breaker: failure window, in milliseconds
+-- ARGV[14] breaker: how long it stays open, in milliseconds
 --
 -- Returns the cooldown now applied to the target, in milliseconds (0 for none).
 
-local outcome = ARGV[1]
-
 -- 1. Token accounting. The request itself always stays in the RPM window and
 -- the RPD counter: the provider may have counted it even when the call failed.
-local reserved_member = ARGV[6] .. ":" .. ARGV[7]
+local reservation_id = ARGV[6]
+local reserved_member = reservation_id .. ":" .. ARGV[7]
 local token_action = ARGV[8]
 local used_tokens = tonumber(ARGV[9])
 
@@ -30,11 +38,48 @@ elseif token_action == "correct" and used_tokens >= 0 then
   local reserved_at = redis.call("ZSCORE", KEYS[3], reserved_member)
   if reserved_at then
     redis.call("ZREM", KEYS[3], reserved_member)
-    redis.call("ZADD", KEYS[3], reserved_at, ARGV[6] .. ":" .. used_tokens)
+    redis.call("ZADD", KEYS[3], reserved_at, reservation_id .. ":" .. used_tokens)
   end
 end
 
--- 2. Cooldown.
+-- 2. Circuit breaker.
+local breaker_result = ARGV[10]
+local is_trial = ARGV[11] == "1"
+local failure_threshold = tonumber(ARGV[12])
+local failure_window_ms = tonumber(ARGV[13])
+local open_ms = tonumber(ARGV[14])
+
+local function open_breaker()
+  redis.call("SET", KEYS[5], 1, "PX", open_ms)
+  redis.call("SET", KEYS[6], 1)
+  redis.call("DEL", KEYS[4])
+end
+
+if is_trial then
+  redis.call("DEL", KEYS[7])
+  if breaker_result == "success" then
+    -- Half-open -> closed.
+    redis.call("DEL", KEYS[6])
+  elseif breaker_result == "failure" then
+    -- Half-open -> open again.
+    open_breaker()
+  end
+  -- Neutral: the slot is free again, the breaker stays half-open.
+elseif breaker_result == "failure" then
+  local time = redis.call("TIME")
+  local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+  redis.call("ZREMRANGEBYSCORE", KEYS[4], "-inf", now_ms - failure_window_ms)
+  redis.call("ZADD", KEYS[4], now_ms, reservation_id)
+  redis.call("PEXPIRE", KEYS[4], failure_window_ms)
+  if redis.call("ZCARD", KEYS[4]) >= failure_threshold then
+    -- Closed -> open.
+    open_breaker()
+  end
+end
+
+-- 3. Cooldown.
+local outcome = ARGV[1]
+
 if outcome == "success" then
   redis.call("DEL", KEYS[2])
   return 0

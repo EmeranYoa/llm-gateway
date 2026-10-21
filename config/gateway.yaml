@@ -12,6 +12,10 @@ gateway:
     initial: 60 # after a 429 without retry delay; doubles on each 429 in a row
     max: 3600 # upper bound of that progressive cooldown
     misconfigured: 600 # after a 401, 403 or 404 (bad API key, removed model)
+  breaker: # circuit breaker, per provider/model
+    failures: 5 # 5xx, network errors or timeouts within the window that open it
+    window: 60 # seconds
+    open: 30 # seconds it stays open before a single trial call is let through
 
 providers:
   groq:
