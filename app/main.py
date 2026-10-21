@@ -39,7 +39,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="LLM Gateway", version="0.1.0", lifespan=lifespan)
     app.state.config = config
-    app.state.router = Router(config.routes, providers)
+    app.state.router = Router(
+        config.routes,
+        providers,
+        deadline=config.deadline,
+        min_attempt_time=config.min_attempt_time,
+    )
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.include_router(router)
     return app

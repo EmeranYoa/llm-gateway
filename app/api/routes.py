@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from app.config import GatewayConfig
 from app.routing.router import (
     AllTargetsFailed,
+    DeadlineExceeded,
     NoEnabledTarget,
     RequestTooLarge,
     Router,
@@ -126,6 +127,8 @@ async def chat_completions(
         )
     except AllTargetsFailed as exc:
         return error_response(503, str(exc), "api_error", code="all_targets_failed")
+    except DeadlineExceeded as exc:
+        return error_response(504, str(exc), "api_error", code="deadline_exceeded")
     response.headers["X-Gateway-Provider"] = routed.target.provider.name
     response.headers["X-Gateway-Model"] = routed.target.model
     response.headers["X-Gateway-Fallbacks"] = str(routed.fallbacks)

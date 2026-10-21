@@ -42,6 +42,10 @@ def test_startup_fails_when_route_references_unknown_model(
         ("missing base_url", "providers: {ollama: {api_key_env: null, models: {}}}\nroutes: {}"),
         ("unknown field", "providers: {}\nroutes: {}\nunknown: 1"),
         (
+            "min_attempt_time not below deadline",
+            "gateway: {deadline: 1, min_attempt_time: 1}\nproviders: {}\nroutes: {}",
+        ),
+        (
             "negative limit",
             """
             providers:

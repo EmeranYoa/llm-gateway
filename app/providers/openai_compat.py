@@ -14,6 +14,7 @@ from app.providers.base import (
     InvalidRequest,
     Provider,
     ProviderResponse,
+    ProviderTimeout,
     ProviderUnavailable,
     RateLimited,
     TargetMisconfigured,
@@ -34,13 +35,21 @@ class OpenAICompatibleProvider(Provider):
         self._settings = settings
         self._http_client = http_client
 
-    async def chat_completion(self, model: str, body: dict[str, Any]) -> ProviderResponse:
+    async def chat_completion(
+        self,
+        model: str,
+        body: dict[str, Any],
+        timeout: float,  # noqa: ASYNC109 (see Provider.chat_completion)
+    ) -> ProviderResponse:
         try:
             response = await self._http_client.post(
                 f"{self._settings.base_url}/chat/completions",
                 json={**body, "model": model},
                 headers=self._auth_headers(),
+                timeout=timeout,
             )
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeout() from exc
         except httpx.TransportError as exc:
             raise ProviderUnavailable(f"network error ({type(exc).__name__})") from exc
         if response.status_code == 429:

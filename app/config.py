@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,15 @@ class ProviderConfig(_FileModel):
 
 class GatewaySection(_FileModel):
     deadline: float = Field(default=60.0, gt=0)
+    min_attempt_time: float = Field(default=1.0, gt=0)
     default_completion_tokens: int = Field(default=512, gt=0)
+
+    @model_validator(mode="after")
+    def _attempts_fit_in_deadline(self) -> "GatewaySection":
+        # Otherwise no request could ever start an attempt.
+        if self.min_attempt_time >= self.deadline:
+            raise ValueError("min_attempt_time must be lower than deadline")
+        return self
 
 
 class FileConfig(_FileModel):
@@ -97,6 +105,9 @@ class Target:
 @dataclass(frozen=True)
 class GatewayConfig:
     deadline: float
+    """Maximum time in seconds for a whole request, failovers included."""
+    min_attempt_time: float
+    """No new attempt starts when less than this many seconds remain before the deadline."""
     default_completion_tokens: int
     routes: Mapping[str, tuple[Target, ...]]
     enabled_providers: tuple[str, ...]
@@ -115,6 +126,7 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
 
     return GatewayConfig(
         deadline=file_config.gateway.deadline,
+        min_attempt_time=file_config.gateway.min_attempt_time,
         default_completion_tokens=file_config.gateway.default_completion_tokens,
         routes=_resolve_routes(file_config, providers),
         enabled_providers=tuple(providers),

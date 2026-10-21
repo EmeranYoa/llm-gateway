@@ -36,6 +36,17 @@ class ProviderUnavailable(ProviderError):
     """HTTP 5xx, network error or timeout: the provider cannot answer right now."""
 
 
+class ProviderTimeout(ProviderUnavailable):
+    """The provider did not answer within the attempt timeout.
+
+    It is a `ProviderUnavailable` for failover, but kept distinct because a
+    timed-out call may still have generated tokens upstream.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("timeout")
+
+
 class TargetMisconfigured(ProviderError):
     """HTTP 401, 403 or 404: bad API key or removed model.
 
@@ -81,11 +92,21 @@ class Provider(ABC):
     """An upstream service that can run chat completions."""
 
     @abstractmethod
-    async def chat_completion(self, model: str, body: dict[str, Any]) -> ProviderResponse:
+    async def chat_completion(
+        self,
+        model: str,
+        body: dict[str, Any],
+        timeout: float,  # noqa: ASYNC109 (needed by the HTTP client, see below)
+    ) -> ProviderResponse:
         """Run a chat completion with `model`.
 
         `body` is the client request in OpenAI format. It is sent unchanged,
         except for the `model` field, which is replaced by `model`.
+
+        `timeout` is the time in seconds the call may take. When it runs out,
+        the provider raises `ProviderTimeout`. The router also enforces it with
+        `asyncio.timeout`, but the provider needs the value to configure its own
+        HTTP client, which otherwise applies its own default timeout.
 
         Raises one of the `ProviderError` subclasses when the call fails.
         """

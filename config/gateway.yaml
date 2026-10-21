@@ -6,6 +6,7 @@
 
 gateway:
   deadline: 60 # seconds, for the whole request including failovers
+  min_attempt_time: 1 # seconds; no new attempt starts when less time remains before the deadline
   default_completion_tokens: 512 # used to estimate tokens when max_tokens is missing
 
 providers:

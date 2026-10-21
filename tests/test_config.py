@@ -24,6 +24,7 @@ def test_defaults_apply_when_optional_fields_are_missing(write_config: WriteConf
 
     (target,) = config.routes["chat-fast"]
     assert config.deadline == 60.0
+    assert config.min_attempt_time == 1.0
     assert config.default_completion_tokens == 512
     assert target.limits.timeout == 30.0
     assert (target.limits.rpm, target.limits.tpm, target.limits.rpd) == (None, None, None)
@@ -35,6 +36,7 @@ def test_configured_values_override_defaults(write_config: WriteConfig) -> None:
     settings = write_config("""
         gateway:
           deadline: 20
+          min_attempt_time: 2.5
           default_completion_tokens: 256
         providers:
           gemini:
@@ -51,6 +53,7 @@ def test_configured_values_override_defaults(write_config: WriteConfig) -> None:
 
     (target,) = config.routes["chat-fast"]
     assert config.deadline == 20.0
+    assert config.min_attempt_time == 2.5
     assert config.default_completion_tokens == 256
     assert (target.limits.rpm, target.limits.tpm, target.limits.rpd) == (10, None, 250)
     assert target.limits.timeout == 15.0
