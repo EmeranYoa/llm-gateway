@@ -1,0 +1,34 @@
+# Gateway configuration: providers, their models, and routes (aliases).
+#
+# Limits, timeout and daily_reset belong to the model or provider, never to a route.
+# Model names, limits and reset times below are examples: free tiers change often,
+# check each provider's documentation before relying on them.
+
+gateway:
+  deadline: 60 # seconds, for the whole request including failovers
+  default_completion_tokens: 512 # used to estimate tokens when max_tokens is missing
+
+providers:
+  groq:
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+    daily_reset: { time: "00:00", timezone: "UTC" }
+    models:
+      llama-3.3-70b-versatile: { rpm: 30, tpm: 6000, rpd: 1000, timeout: 30 }
+
+  gemini:
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key_env: GEMINI_API_KEY
+    daily_reset: { time: "00:00", timezone: "America/Los_Angeles" }
+    models:
+      gemini-2.5-flash: { rpm: 10, rpd: 250 }
+
+  ollama:
+    base_url: http://ollama:11434/v1
+    api_key_env: null
+    models:
+      "llama3.2:3b": { timeout: 120 } # last resort, no limits
+
+routes:
+  chat-fast:
+    [groq/llama-3.3-70b-versatile, gemini/gemini-2.5-flash, ollama/llama3.2:3b]
