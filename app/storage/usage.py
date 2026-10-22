@@ -10,17 +10,14 @@ from collections.abc import Sequence
 
 from sqlalchemy import BigInteger, DateTime, Identity, String, Text, false, insert
 from sqlalchemy.ext.asyncio import AsyncEngine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.routing.router import Attempt
+from app.storage.db import Base
 
 logger = logging.getLogger(__name__)
 
 ERROR_MESSAGE_MAX_CHARS = 500
-
-
-class Base(DeclarativeBase):
-    """Base class of the database tables. Alembic reads its metadata."""
 
 
 class UsageLogRow(Base):

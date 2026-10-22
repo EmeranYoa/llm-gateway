@@ -10,14 +10,14 @@ import httpx
 import pytest
 import respx
 from httpx import AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings
-from tests.conftest import FetchUsageRows, gateway_client
+from tests.conftest import FetchUsageRows
 from tests.upstream import (
-    CHAT_CONFIG,
     CHAT_REQUEST,
     GEMINI_URL,
-    GROQ_KEY,
     GROQ_URL,
     OLLAMA_URL,
     completion_body,
@@ -253,54 +253,32 @@ async def test_prompt_is_never_stored(
     assert not any(prompt in str(value) for value in row.values())
 
 
-async def test_client_gets_its_response_when_postgresql_is_down(
-    write_config: WriteConfig,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_client_gets_its_response_when_the_usage_log_write_fails(
+    chat_client: AsyncClient,
     respx_mock: respx.MockRouter,
     caplog: pytest.LogCaptureFixture,
+    database_url: str,
 ) -> None:
-    monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
     respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
-    settings = write_config(CHAT_CONFIG).model_copy(
-        update={"database_url": "postgresql+asyncpg://gateway:gateway@127.0.0.1:1/gateway"}
-    )
     prompt = "my confidential prompt"
+    admin = create_async_engine(database_url)
 
-    with caplog.at_level(logging.ERROR):
-        async with gateway_client(settings) as client:
-            response = await client.post(
+    # Hide the table: the usage log INSERT fails, while API key checks still work.
+    async with admin.begin() as connection:
+        await connection.execute(text("ALTER TABLE usage_log RENAME TO usage_log_hidden"))
+    try:
+        with caplog.at_level(logging.ERROR):
+            response = await chat_client.post(
                 "/v1/chat/completions",
                 json={**CHAT_REQUEST, "messages": [{"role": "user", "content": prompt}]},
             )
+    finally:
+        async with admin.begin() as connection:
+            await connection.execute(text("ALTER TABLE usage_log_hidden RENAME TO usage_log"))
+        await admin.dispose()
 
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "Hello!"
     request_id = response.headers["X-Gateway-Request-Id"]
     assert f"could not write the usage log of request {request_id}" in caplog.messages
     assert prompt not in caplog.text
-
-
-async def test_usage_log_write_gives_up_when_postgres_does_not_answer(
-    write_config: WriteConfig,
-    monkeypatch: pytest.MonkeyPatch,
-    respx_mock: respx.MockRouter,
-    caplog: pytest.LogCaptureFixture,
-    silent_server: int,
-) -> None:
-    monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
-    respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
-    settings = write_config(CHAT_CONFIG).model_copy(
-        update={
-            "database_url": f"postgresql+asyncpg://gateway:gateway@127.0.0.1:{silent_server}/gateway",
-            "database_timeout": 0.5,
-        }
-    )
-
-    with caplog.at_level(logging.ERROR):
-        async with asyncio.timeout(5), gateway_client(settings) as client:
-            # The background write runs before the in-process client returns.
-            response = await client.post("/v1/chat/completions", json=CHAT_REQUEST)
-
-    assert response.status_code == 200
-    request_id = response.headers["X-Gateway-Request-Id"]
-    assert f"could not write the usage log of request {request_id}" in caplog.messages

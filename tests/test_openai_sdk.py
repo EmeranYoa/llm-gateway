@@ -5,13 +5,17 @@ import pytest
 import respx
 from httpx import AsyncClient
 
+from tests.conftest import new_api_key
 from tests.upstream import GROQ_URL, completion_body
 
 
 @pytest.fixture
-def sdk(chat_client: AsyncClient) -> openai.AsyncOpenAI:
+async def sdk(chat_client: AsyncClient, database_url: str) -> openai.AsyncOpenAI:
+    """The official SDK, with a gateway API key as `api_key` and the gateway as `base_url`."""
     return openai.AsyncOpenAI(
-        base_url="http://gateway/v1", api_key="not-checked-by-the-gateway", http_client=chat_client
+        base_url="http://gateway/v1",
+        api_key=await new_api_key(database_url),
+        http_client=chat_client,
     )
 
 

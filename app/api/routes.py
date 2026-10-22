@@ -5,10 +5,11 @@ import math
 from typing import Annotated, Any, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.auth.authenticator import Authenticator
 from app.config import GatewayConfig
 from app.routing.acquisition import TargetGate
 from app.routing.router import (
@@ -23,6 +24,7 @@ from app.routing.router import (
     UnknownAlias,
 )
 from app.schemas import ChatCompletionRequest, ErrorBody, ErrorDetail
+from app.storage.tenants import KeyOwner
 from app.storage.usage import UsageLog
 
 router = APIRouter()
@@ -43,6 +45,19 @@ def get_gate(request: Request) -> TargetGate:
     return cast(TargetGate, request.app.state.gate)
 
 
+def get_authenticator(request: Request) -> Authenticator:
+    """Return the API key checker built at startup."""
+    return cast(Authenticator, request.app.state.authenticator)
+
+
+async def authenticate(
+    authenticator: Annotated[Authenticator, Depends(get_authenticator)],
+    authorization: Annotated[str | None, Header()] = None,
+) -> KeyOwner:
+    """Check the gateway API key of the request (`Authorization: Bearer <key>`)."""
+    return await authenticator.authenticate(authorization)
+
+
 def get_usage_log(request: Request) -> UsageLog:
     """Return the usage log built at startup."""
     return cast(UsageLog, request.app.state.usage_log)
@@ -50,26 +65,16 @@ def get_usage_log(request: Request) -> UsageLog:
 
 @router.get("/health")
 async def health(
-    config: Annotated[GatewayConfig, Depends(get_config)],
     gate: Annotated[TargetGate, Depends(get_gate)],
-) -> dict[str, Any]:
-    """Report that the gateway is up, whether Redis answers, and which providers are usable.
+) -> dict[str, str]:
+    """Report that the gateway is up and whether Redis answers. Public: no API key needed.
 
-    Without Redis the gateway still serves requests, without cooldown, breaker
-    or quota checks: its status is then "degraded" (ADR 0002).
+    It reveals nothing about routes or providers. Without Redis the gateway still
+    serves requests, without cooldown, breaker or quota checks: its status is then
+    "degraded" (ADR 0002).
     """
     redis_up = await gate.is_available()
-    return {
-        "status": "ok" if redis_up else "degraded",
-        "redis": "up" if redis_up else "down",
-        "providers": {
-            "enabled": list(config.enabled_providers),
-            "disabled": list(config.disabled_providers),
-        },
-        "routes": {
-            alias: [target.name for target in targets] for alias, targets in config.routes.items()
-        },
-    }
+    return {"status": "ok" if redis_up else "degraded", "redis": "up" if redis_up else "down"}
 
 
 def error_response(
@@ -83,6 +88,23 @@ def error_response(
     """Build an error response in OpenAI format."""
     body = ErrorBody(error=ErrorDetail(message=message, type=error_type, param=param, code=code))
     return JSONResponse(status_code=status_code, content=body.model_dump())
+
+
+async def invalid_api_key_handler(_: Request, __: Exception) -> JSONResponse:
+    """Refuse a request without a valid gateway API key (OpenAI format, 401)."""
+    return error_response(
+        401, "Missing or invalid API key.", "invalid_request_error", code="invalid_api_key"
+    )
+
+
+async def authentication_unavailable_handler(_: Request, __: Exception) -> JSONResponse:
+    """Refuse a request whose key cannot be checked: never accept an unchecked key."""
+    return error_response(
+        503,
+        "The API key cannot be checked right now. Try again later.",
+        "api_error",
+        code="authentication_unavailable",
+    )
 
 
 async def validation_error_handler(_: Request, exc: Exception) -> JSONResponse:
@@ -100,7 +122,7 @@ async def validation_error_handler(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
-@router.post("/v1/chat/completions", response_model=None)
+@router.post("/v1/chat/completions", response_model=None, dependencies=[Depends(authenticate)])
 async def chat_completions(
     request: ChatCompletionRequest,
     response: Response,

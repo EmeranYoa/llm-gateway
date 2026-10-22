@@ -7,6 +7,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from alembic import command
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings
 from app.main import create_app
+from app.storage.tenants import create_api_key
 from tests.upstream import CHAT_CONFIG, FAILOVER_CONFIG, GEMINI_KEY, GROQ_KEY
 
 MINIMAL_CONFIG = """
@@ -99,16 +101,39 @@ def write_config(tmp_path: Path, database_url: str, redis_url: str) -> Callable[
     return _write
 
 
+# Pass as `api_key` to `gateway_client` to get a client with a fresh, valid key.
+NEW_KEY = "create a new key"
+
+
 @asynccontextmanager
-async def gateway_client(settings: Settings) -> AsyncIterator[AsyncClient]:
-    """Start a gateway with `settings` (startup and shutdown included) and yield a client for it."""
+async def gateway_client(
+    settings: Settings, api_key: str | None = NEW_KEY
+) -> AsyncIterator[AsyncClient]:
+    """Start a gateway with `settings` (startup and shutdown included) and yield a client for it.
+
+    By default the client sends a valid API key of a new tenant. Pass another
+    `api_key` to send that one, or None to send no key at all.
+    """
+    if api_key == NEW_KEY:
+        api_key = await new_api_key(settings.database_url)
+    headers = {} if api_key is None else {"Authorization": f"Bearer {api_key}"}
     app = create_app(settings)
     transport = ASGITransport(app=app)
     async with (
         app.router.lifespan_context(app),
-        AsyncClient(transport=transport, base_url="http://gateway") as http_client,
+        AsyncClient(transport=transport, base_url="http://gateway", headers=headers) as http_client,
     ):
         yield http_client
+
+
+async def new_api_key(database_url: str) -> str:
+    """Create a tenant with a unique name and return a valid API key for it."""
+    engine = create_async_engine(database_url)
+    try:
+        new_key = await create_api_key(engine, f"tenant-{uuid4().hex[:8]}")
+    finally:
+        await engine.dispose()
+    return new_key.key
 
 
 @pytest.fixture

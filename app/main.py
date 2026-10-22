@@ -12,7 +12,13 @@ from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.api.routes import router, validation_error_handler
+from app.api.routes import (
+    authentication_unavailable_handler,
+    invalid_api_key_handler,
+    router,
+    validation_error_handler,
+)
+from app.auth.authenticator import AuthenticationUnavailable, Authenticator, InvalidApiKey
 from app.config import Settings, load_config
 from app.providers.base import Provider
 from app.providers.openai_compat import OpenAICompatibleProvider
@@ -75,6 +81,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         default_completion_tokens=config.default_completion_tokens,
     )
     app.state.usage_log = UsageLog(database_engine)
+    app.state.authenticator = Authenticator(database_engine)
     app.add_exception_handler(RequestValidationError, validation_error_handler)
+    app.add_exception_handler(InvalidApiKey, invalid_api_key_handler)
+    app.add_exception_handler(AuthenticationUnavailable, authentication_unavailable_handler)
     app.include_router(router)
     return app
