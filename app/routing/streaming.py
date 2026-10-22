@@ -15,6 +15,8 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
+import anyio
+
 from app.config import StreamSection, Target
 from app.providers.base import ProviderError, StreamChunk
 
@@ -40,6 +42,7 @@ class CommittedStream:
         limits: StreamSection,
         on_end: Callable[[], Awaitable[None]],
         on_interrupted: Callable[[str], Awaitable[None]],
+        on_cancelled: Callable[[], Awaitable[None]],
     ) -> None:
         self.target = target
         self.fallbacks = fallbacks
@@ -49,12 +52,18 @@ class CommittedStream:
         self._limits = limits
         self._on_end = on_end
         self._on_interrupted = on_interrupted
+        self._on_cancelled = on_cancelled
 
     async def chunks(self) -> AsyncIterator[dict[str, Any]]:
         """Yield every chunk of the answer, then record the end of the stream.
 
         Raises `StreamInterrupted` when the provider fails, goes silent for longer
         than the idle timeout, or the stream lasts longer than the maximum duration.
+
+        When the client leaves, the web server cancels this generator: the
+        provider call is closed and the cancellation recorded before it goes on.
+        The clean-up is shielded, because the cancellation would otherwise hit
+        every await of the clean-up too.
         """
         for chunk in self._read_so_far:
             yield chunk.data
@@ -67,6 +76,12 @@ class CommittedStream:
                     chunk = await anext(self._rest)
             except StopAsyncIteration:
                 break
+            except asyncio.CancelledError:
+                # The client left: stop reading from the provider at once.
+                with anyio.CancelScope(shield=True):
+                    await self._rest.aclose()
+                    await self._on_cancelled()
+                raise
             except TimeoutError:
                 reason = "idle timeout" if wait < time_left else "maximum stream duration reached"
                 await self._interrupt(reason)

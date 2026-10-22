@@ -195,6 +195,14 @@ class TargetGate:
             breaker="failure",
         )
 
+    async def record_cancelled(self, target: Target, reservation: Reservation) -> None:
+        """The client left before the call ended: not the provider's fault.
+
+        Neutral for the breaker (a half-open trial slot is released). The tokens
+        stay reserved: the provider may have generated them already.
+        """
+        await self._record(target, reservation, cooldown="none", tokens="keep", breaker="neutral")
+
     async def record_rate_limited(
         self, target: Target, reservation: Reservation, retry_after: float | None
     ) -> float | None:

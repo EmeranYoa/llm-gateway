@@ -8,6 +8,7 @@ import pytest
 import respx
 from httpx import AsyncClient
 
+from app.routing.acquisition import TargetGate
 from tests.conftest import ClientFactory, FetchUsageRows
 from tests.upstream import (
     CHAT_REQUEST,
@@ -161,6 +162,37 @@ async def test_client_error_on_trial_counts_as_success(
 
 
 async def test_trial_slot_frees_itself_when_the_trial_never_reports_back(
+    client: AsyncClient, respx_mock: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trial_started = asyncio.Event()
+
+    async def hanging_call(_: httpx.Request) -> httpx.Response:
+        trial_started.set()
+        await asyncio.sleep(10)
+        raise AssertionError("the trial call is cancelled before it ends")
+
+    groq = respx_mock.post(GROQ_URL).mock(side_effect=responses(500, 500, 500))
+    await open_breaker(client)
+    groq.mock(side_effect=[hanging_call, *responses(200)])
+
+    # The trial starts, then its gateway instance "dies": it never reports an outcome,
+    # not even the cancellation a living instance records when its client leaves.
+    monkeypatch.setattr(TargetGate, "record_cancelled", dead_instance_records_nothing)
+    trial = asyncio.create_task(client.post("/v1/chat/completions", json=CHAT_REQUEST))
+    await asyncio.wait_for(trial_started.wait(), timeout=1)
+    trial.cancel()
+    await asyncio.gather(trial, return_exceptions=True)
+    # respx only counts calls that got a response: the cancelled trial is not counted.
+    assert groq.call_count == 3
+
+    await send(client)
+    assert groq.call_count == 3, "the trial slot is still held"
+    await asyncio.sleep(0.5)  # the slot TTL is the attempt timeout: 0.5 s
+    await send(client)
+    assert groq.call_count == 4, "the trial slot must free itself"
+
+
+async def test_trial_slot_is_released_when_the_client_leaves(
     client: AsyncClient, respx_mock: respx.MockRouter
 ) -> None:
     trial_started = asyncio.Event()
@@ -174,16 +206,15 @@ async def test_trial_slot_frees_itself_when_the_trial_never_reports_back(
     await open_breaker(client)
     groq.mock(side_effect=[hanging_call, *responses(200)])
 
-    # The trial starts, then its gateway instance "dies": it never reports an outcome.
     trial = asyncio.create_task(client.post("/v1/chat/completions", json=CHAT_REQUEST))
     await asyncio.wait_for(trial_started.wait(), timeout=1)
-    trial.cancel()
+    trial.cancel()  # the client leaves during the trial
     await asyncio.gather(trial, return_exceptions=True)
-    # respx only counts calls that got a response: the cancelled trial is not counted.
-    assert groq.call_count == 3
 
+    # Not the provider's fault: the slot is free at once, for a new trial.
     await send(client)
-    assert groq.call_count == 3, "the trial slot is still held"
-    await asyncio.sleep(0.5)  # the slot TTL is the attempt timeout: 0.5 s
-    await send(client)
-    assert groq.call_count == 4, "the trial slot must free itself"
+    assert groq.call_count == 4
+
+
+async def dead_instance_records_nothing(*_: object) -> None:
+    """Stand-in for `TargetGate.record_cancelled` in a gateway instance that crashed."""

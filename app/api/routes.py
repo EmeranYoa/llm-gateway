@@ -1,9 +1,11 @@
 """HTTP routes of the gateway."""
 
+import asyncio
+import contextlib
 import datetime as dt
 import json
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from typing import Annotated, Any, cast
 from uuid import uuid4
 
@@ -143,13 +145,14 @@ async def validation_error_handler(_: Request, exc: Exception) -> JSONResponse:
 @router.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
     request: ChatCompletionRequest,
+    raw_request: Request,
     response: Response,
     background_tasks: BackgroundTasks,
     owner: Annotated[KeyOwner, Depends(authenticate)],
     tenant_gate: Annotated[TenantGate, Depends(get_tenant_gate)],
     gateway_router: Annotated[Router, Depends(get_router)],
     usage_log: Annotated[UsageLog, Depends(get_usage_log)],
-) -> dict[str, Any] | JSONResponse | StreamingResponse:
+) -> dict[str, Any] | Response:
     """Route an OpenAI chat completion request to a provider/model target.
 
     The tenant quotas are checked first: a tenant over its quota gets a 429 and
@@ -181,9 +184,7 @@ async def chat_completions(
         refused.headers["X-Gateway-Request-Id"] = request_id
         return refused
     attempts: list[Attempt] = []
-    result = await _route(gateway_router, request, attempts, redis_down=admission.degraded)
-    if not isinstance(result, CommittedStream):
-        await _record_tenant_outcome(tenant_gate, admission, result, attempts)
+    # Written after the response, with every attempt the routing appends below.
     background_tasks.add_task(
         usage_log.write,
         request_id=request_id,
@@ -194,6 +195,17 @@ async def chat_completions(
         stream=request.stream,
         attempts=attempts,
     )
+    routing = _route(gateway_router, request, attempts, redis_down=admission.degraded)
+    try:
+        # A streamed request may wait long for its first content: stop if the client leaves.
+        result = (
+            await _unless_client_leaves(raw_request, routing) if request.stream else await routing
+        )
+    except ClientLeft:
+        # Nobody reads this response; the usage log still records the cancelled attempt.
+        return Response(status_code=CLIENT_CLOSED_REQUEST)
+    if not isinstance(result, CommittedStream):
+        await _record_tenant_outcome(tenant_gate, admission, result, attempts)
     if isinstance(result, JSONResponse):
         result.headers["X-Gateway-Request-Id"] = request_id
         return result
@@ -209,6 +221,36 @@ async def chat_completions(
     response.headers["X-Gateway-Fallbacks"] = str(result.fallbacks)
     response.headers["X-Gateway-Request-Id"] = request_id
     return result.body
+
+
+# Status for a request the client abandoned (a convention from nginx): never read.
+CLIENT_CLOSED_REQUEST = 499
+
+
+class ClientLeft(Exception):
+    """The client closed its connection before the gateway answered."""
+
+
+async def _unless_client_leaves[T](raw_request: Request, work: Coroutine[Any, Any, T]) -> T:
+    """Run `work`, but cancel it if the client disconnects first (then raise `ClientLeft`)."""
+    working = asyncio.ensure_future(work)
+    watching = asyncio.ensure_future(_client_disconnects(raw_request))
+    try:
+        await asyncio.wait({working, watching}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        watching.cancel()
+    if working.done():
+        return working.result()
+    working.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await working
+    raise ClientLeft
+
+
+async def _client_disconnects(raw_request: Request) -> None:
+    """Return when the client closes its connection (the body is already read)."""
+    while (await raw_request.receive())["type"] != "http.disconnect":
+        pass
 
 
 def _routing_headers(target: Target, fallbacks: int, request_id: str) -> dict[str, str]:

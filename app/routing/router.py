@@ -9,6 +9,8 @@ from enum import StrEnum
 from http import HTTPStatus
 from typing import Any
 
+import anyio
+
 from app.config import StreamSection, Target
 from app.providers.base import (
     ContextTooLarge,
@@ -104,6 +106,7 @@ class Outcome(StrEnum):
     SKIPPED_BREAKER = "skipped_breaker"
     SKIPPED_QUOTA = "skipped_quota"
     INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,19 @@ class Attempt:
             completion_tokens=response.completion_tokens,
             estimated_tokens=reservation.tokens,
             degraded=reservation.degraded,
+        )
+
+    @classmethod
+    def cancelled(cls, call: "_Call", first_token_ms: int | None = None) -> "Attempt":
+        """Build the attempt of a call the client left before it ended."""
+        return cls(
+            call.target,
+            Outcome.CANCELLED,
+            latency_ms=call.elapsed_ms(),
+            first_token_ms=first_token_ms,
+            error_message="the client closed the connection",
+            estimated_tokens=call.reservation.tokens,
+            degraded=call.reservation.degraded,
         )
 
     @classmethod
@@ -349,6 +365,10 @@ class Router:
                     )
                 )
 
+            async def on_cancelled() -> None:
+                await self._gate.record_cancelled(call.target, call.reservation)
+                attempts.append(Attempt.cancelled(call, first_token_ms))
+
             async def on_interrupted(reason: str) -> None:
                 await self._gate.record_stream_interrupted(call.target, call.reservation)
                 attempts.append(
@@ -373,6 +393,7 @@ class Router:
                 limits=self._stream_limits,
                 on_end=on_end,
                 on_interrupted=on_interrupted,
+                on_cancelled=on_cancelled,
             )
 
         return await self._try_targets(
@@ -445,6 +466,12 @@ class Router:
             )
             try:
                 return await answer(call)
+            except asyncio.CancelledError:
+                # The client left: no more targets, and not the provider's fault.
+                attempts.append(Attempt.cancelled(call))
+                with anyio.CancelScope(shield=True):
+                    await self._gate.record_cancelled(target, acquired)
+                raise
             except InvalidRequest as error:
                 attempts.append(Attempt.failed(target, error, call.elapsed_ms(), acquired))
                 await self._record_failure(target, acquired, error)

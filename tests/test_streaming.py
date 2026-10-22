@@ -496,3 +496,92 @@ async def test_streamed_request_refused_by_a_tenant_quota_is_marked_as_streamed(
     assert (allowed["outcome"], allowed["stream"]) == ("success", False)
     assert (rejected["outcome"], rejected["stream"]) == ("rejected_tenant_quota", True)
     assert rejected["first_token_ms"] is None
+
+
+# --- Client disconnect ---
+
+
+def held_open_stream(first: bytes, closed: asyncio.Event) -> httpx.Response:
+    """A streamed answer that sends `first`, then stays open until the gateway closes it."""
+
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            yield first
+            await asyncio.sleep(30)
+            yield sse("[DONE]")
+        finally:
+            closed.set()  # the gateway closed the upstream call
+
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+
+
+async def rows_when_written(usage_rows: FetchUsageRows, count: int) -> list[dict[str, Any]]:
+    """The usage log is written in the background: wait until `count` rows are there."""
+    async with asyncio.timeout(5):
+        while len(rows := await usage_rows()) < count:  # noqa: ASYNC110 (rows land in the database)
+            await asyncio.sleep(0.05)
+    return rows
+
+
+@pytest.mark.usefixtures("stream_keys")
+async def test_client_leaving_a_stream_closes_the_upstream_call(
+    write_config: Callable[[str], Settings],
+    respx_mock: respx.MockRouter,
+    usage_rows: FetchUsageRows,
+) -> None:
+    respx_mock.route(host="127.0.0.1").pass_through()
+    upstream_closed = asyncio.Event()
+    groq = respx_mock.post(GROQ_URL).mock(
+        side_effect=[
+            held_open_stream(sse(chunk("Hel")), upstream_closed),
+            httpx.Response(200, json=completion_body("llama-3.3-70b-versatile")),
+        ]
+    )
+
+    async with live_gateway(write_config(stream_config())) as client:
+        async with client.stream("POST", "/v1/chat/completions", json=STREAM_REQUEST) as response:
+            await asyncio.wait_for(next_event_with(response.aiter_lines(), "Hel"), timeout=2)
+        # The client left: the gateway stops reading from the provider at once.
+        await asyncio.wait_for(upstream_closed.wait(), timeout=2)
+        rows = await rows_when_written(usage_rows, 1)
+        # A client that leaves is not the provider's fault: the breaker (opening
+        # after one failure here) did not count it, so Groq still answers.
+        after = await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+
+    assert rows[0]["outcome"] == "cancelled"
+    assert rows[0]["first_token_ms"] is not None
+    assert after.headers["X-Gateway-Provider"] == "groq"
+    assert groq.call_count == 2
+
+
+@pytest.mark.usefixtures("stream_keys")
+async def test_client_leaving_before_the_first_content_stops_the_failover(
+    write_config: Callable[[str], Settings],
+    respx_mock: respx.MockRouter,
+    usage_rows: FetchUsageRows,
+) -> None:
+    respx_mock.route(host="127.0.0.1").pass_through()
+    upstream_closed = asyncio.Event()
+    respx_mock.post(GROQ_URL).mock(
+        side_effect=[held_open_stream(sse(chunk(role="assistant", content="")), upstream_closed)]
+    )
+    gemini = respx_mock.post(GEMINI_URL).mock(return_value=stream_response(*GEMINI_STREAM))
+    # Groq times out after 1 s: without the disconnect, the gateway would then try Gemini.
+    config = stream_config().replace(
+        "llama-3.3-70b-versatile: {}", "llama-3.3-70b-versatile: { timeout: 1 }"
+    )
+
+    async with live_gateway(write_config(config)) as client:
+        request = asyncio.create_task(client.post("/v1/chat/completions", json=STREAM_REQUEST))
+        await asyncio.sleep(0.3)
+        request.cancel()  # the client leaves while Groq has sent no content yet
+        await asyncio.gather(request, return_exceptions=True)
+        await asyncio.wait_for(upstream_closed.wait(), timeout=2)
+        rows = await rows_when_written(usage_rows, 1)
+        await asyncio.sleep(1.2)  # past the Groq timeout: a failover would have happened
+
+    assert not gemini.called
+    assert [(row["provider"], row["outcome"]) for row in await usage_rows()] == [
+        ("groq", "cancelled")
+    ]
+    assert rows[0]["first_token_ms"] is None
