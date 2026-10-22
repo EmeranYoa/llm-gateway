@@ -33,7 +33,7 @@ from app.routing.router import (
     TargetRejectedRequest,
     UnknownAlias,
 )
-from app.routing.streaming import CommittedStream
+from app.routing.streaming import CommittedStream, StreamInterrupted
 from app.schemas import ChatCompletionRequest, ErrorBody, ErrorDetail
 from app.storage.tenants import KeyOwner
 from app.storage.usage import UsageLog
@@ -219,11 +219,27 @@ def _routing_headers(target: Target, fallbacks: int, request_id: str) -> dict[st
 
 
 async def _sse_events(stream: CommittedStream) -> AsyncIterator[str]:
-    """Send each chunk as a Server-Sent Event, with `model` set to the real model."""
-    async for chunk in stream.chunks():
-        payload = {**chunk, "model": stream.target.model}
-        yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+    """Send each chunk as a Server-Sent Event, with `model` set to the real model.
+
+    A stream that breaks after its first content ends with an error event and no
+    `[DONE]`, so the client never takes a truncated answer for a complete one.
+    """
+    try:
+        async for chunk in stream.chunks():
+            yield _sse({**chunk, "model": stream.target.model})
+    except StreamInterrupted as exc:
+        error = ErrorDetail(
+            message=f"The stream was interrupted: {exc.reason}.",
+            type="api_error",
+            code="stream_interrupted",
+        )
+        yield _sse(ErrorBody(error=error).model_dump())
+        return
     yield "data: [DONE]\n\n"
+
+
+def _sse(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
 
 def _tenant_quota_response(exc: TenantQuotaExceeded) -> JSONResponse:

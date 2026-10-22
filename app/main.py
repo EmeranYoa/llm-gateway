@@ -82,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         deadline=config.deadline,
         min_attempt_time=config.min_attempt_time,
         default_completion_tokens=config.default_completion_tokens,
+        stream_limits=config.stream,
     )
     app.state.usage_log = UsageLog(database_engine)
     app.state.authenticator = Authenticator(

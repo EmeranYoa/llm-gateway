@@ -88,7 +88,9 @@ class OpenAICompatibleProvider(Provider):
                 f"{self._settings.base_url}/chat/completions",
                 json={**body, "model": model},
                 headers=self._auth_headers(),
-                timeout=timeout,
+                # No read timeout: a stream may pause between events. The router
+                # bounds the time to the first content, then the gaps between events.
+                timeout=httpx.Timeout(timeout, read=None),
             ) as response:
                 if response.status_code >= 400:
                     await response.aread()

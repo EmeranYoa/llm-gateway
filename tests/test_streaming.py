@@ -6,12 +6,13 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
+import openai
 import pytest
 import respx
 from httpx import AsyncClient
 
 from app.config import Settings
-from tests.conftest import ClientFactory, live_gateway
+from tests.conftest import ClientFactory, FetchUsageRows, live_gateway, new_api_key
 from tests.upstream import (
     CHAT_CONFIG,
     CHAT_REQUEST,
@@ -248,3 +249,166 @@ async def test_half_open_trial_ends_at_the_first_content_of_a_stream(
         await trial
 
     assert other.headers["X-Gateway-Provider"] == "groq"
+
+
+def stream_config(stream: str = "", *, deadline: float = 60) -> str:
+    """Groq then Gemini, a breaker that opens after one failure, and stream settings."""
+    return (
+        f"gateway: {{ deadline: {deadline}, min_attempt_time: 0.1,"
+        f" breaker: {{ failures: 1, window: 60, open: 30 }},"
+        f" stream: {{ {stream} }} }}\n" + FAILOVER_CONFIG
+    )
+
+
+def paced_stream(*parts: tuple[float, bytes]) -> httpx.Response:
+    """A streamed answer whose parts arrive after the given delays (in seconds)."""
+
+    async def body() -> AsyncIterator[bytes]:
+        for delay, part in parts:
+            await asyncio.sleep(delay)
+            yield part
+
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+
+
+def failing_stream(first: bytes, error: Exception) -> httpx.Response:
+    """A streamed answer that sends `first`, then breaks with `error`."""
+
+    async def body() -> AsyncIterator[bytes]:
+        yield first
+        raise error
+
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+
+
+@pytest.fixture
+def stream_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
+    monkeypatch.setenv("GEMINI_API_KEY", GEMINI_KEY)
+
+
+@pytest.mark.parametrize(
+    "broken_stream",
+    [
+        stream_response(chunk("Hel"), {"error": {"code": 502, "message": "upstream failed"}}),
+        failing_stream(sse(chunk("Hel")), httpx.ReadError("connection reset")),
+    ],
+    ids=["error-event", "connection-lost"],
+)
+@pytest.mark.usefixtures("stream_keys")
+async def test_stream_broken_after_the_first_content_ends_with_an_error_event(
+    make_client: ClientFactory,
+    respx_mock: respx.MockRouter,
+    usage_rows: FetchUsageRows,
+    broken_stream: httpx.Response,
+) -> None:
+    groq = respx_mock.post(GROQ_URL).mock(side_effect=[broken_stream])
+    respx_mock.post(GEMINI_URL).respond(json=completion_body("gemini-2.5-flash"))
+
+    async with make_client(stream_config()) as client:
+        response, payloads = await read_stream(client, STREAM_REQUEST)
+        # The breaker counted the interruption as a failure: Groq is now skipped.
+        after = await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+
+    assert response.status_code == 200
+    assert json.loads(payloads[0])["choices"][0]["delta"]["content"] == "Hel"
+    # A truncated answer is never passed off as complete: an error event, no [DONE].
+    assert "[DONE]" not in payloads
+    assert json.loads(payloads[-1])["error"]["code"] == "stream_interrupted"
+    assert after.headers["X-Gateway-Provider"] == "gemini"
+    assert groq.call_count == 1
+    stream_rows = [row for row in await usage_rows() if row["provider"] == "groq"]
+    assert stream_rows[0]["outcome"] == "interrupted"
+    assert stream_rows[0]["status_code"] == 200
+
+
+@pytest.mark.parametrize(
+    ("settings", "parts"),
+    [
+        # Silent for 1 s after the first content: above the 0.3 s idle timeout.
+        ("idle_timeout: 0.3", [(0, sse(chunk("Hel"))), (1, sse(chunk("lo"), "[DONE]"))]),
+        # Keeps talking, but for longer than the 0.5 s maximum duration.
+        (
+            "idle_timeout: 5, max_duration: 0.5",
+            [(0, sse(chunk("a")))] + [(0.2, sse(chunk("b"))) for _ in range(6)],
+        ),
+    ],
+    ids=["idle-timeout", "max-duration"],
+)
+@pytest.mark.usefixtures("stream_keys")
+async def test_stream_timeouts_interrupt_a_committed_stream(
+    make_client: ClientFactory,
+    respx_mock: respx.MockRouter,
+    settings: str,
+    parts: list[tuple[float, bytes]],
+) -> None:
+    respx_mock.post(GROQ_URL).mock(side_effect=[paced_stream(*parts)])
+
+    async with make_client(stream_config(settings)) as client:
+        _, payloads = await read_stream(client, STREAM_REQUEST)
+
+    assert "[DONE]" not in payloads
+    assert json.loads(payloads[-1])["error"]["code"] == "stream_interrupted"
+
+
+@pytest.mark.usefixtures("stream_keys")
+async def test_request_deadline_does_not_cut_a_stream_that_keeps_going(
+    make_client: ClientFactory, respx_mock: respx.MockRouter
+) -> None:
+    # 1.5 s of steady output, with a request deadline of 1 s.
+    parts = [(0, sse(chunk("a")))] + [(0.3, sse(chunk("b"))) for _ in range(5)]
+    respx_mock.post(GROQ_URL).mock(side_effect=[paced_stream(*parts, (0, sse("[DONE]")))])
+
+    async with make_client(stream_config(deadline=1)) as client:
+        _, payloads = await read_stream(client, STREAM_REQUEST)
+
+    assert payloads[-1] == "[DONE]"
+
+
+@pytest.mark.usefixtures("stream_keys")
+async def test_sdk_raises_an_api_error_on_an_interrupted_stream(
+    make_client: ClientFactory, respx_mock: respx.MockRouter, database_url: str
+) -> None:
+    respx_mock.post(GROQ_URL).mock(
+        side_effect=[stream_response(chunk("Hel"), {"error": {"code": 502, "message": "x"}})]
+    )
+
+    async with make_client(stream_config()) as client:
+        sdk = openai.AsyncOpenAI(
+            base_url="http://gateway/v1",
+            api_key=await new_api_key(database_url),
+            http_client=client,
+        )
+        stream = await sdk.chat.completions.create(
+            model="chat-fast", messages=[{"role": "user", "content": "Hi"}], stream=True
+        )
+        with pytest.raises(openai.APIError):
+            async for _ in stream:
+                pass
+
+
+@pytest.mark.usefixtures("stream_keys")
+async def test_interrupted_stream_keeps_its_reserved_tokens(
+    make_client: ClientFactory, respx_mock: respx.MockRouter, usage_rows: FetchUsageRows
+) -> None:
+    # Groq: 1000 tokens per minute. Each request reserves about 611 tokens.
+    config = FAILOVER_CONFIG.replace(
+        "llama-3.3-70b-versatile: {}", "llama-3.3-70b-versatile: { tpm: 1000 }"
+    )
+    request = {
+        **STREAM_REQUEST,
+        "messages": [{"role": "user", "content": "x" * 40}],
+        "max_tokens": 600,
+    }
+    respx_mock.post(GROQ_URL).mock(
+        side_effect=[stream_response(chunk("Hel"), {"error": {"code": 502, "message": "x"}})]
+    )
+    respx_mock.post(GEMINI_URL).mock(return_value=stream_response(*GEMINI_STREAM))
+
+    async with make_client(config) as client:
+        await read_stream(client, request)  # interrupted: part of the answer was generated
+        second, _ = await read_stream(client, request)
+
+    # The interrupted call kept its tokens, so Groq has no room left for a second one.
+    assert second.headers["X-Gateway-Provider"] == "gemini"
+    assert [row["outcome"] for row in await usage_rows()][-2:] == ["skipped_quota", "success"]

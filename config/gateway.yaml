@@ -15,6 +15,9 @@ gateway:
     failures: 5 # 5xx, network errors or timeouts within the window that open it
     window: 60 # seconds
     open: 30 # seconds it stays open before a single trial call is let through
+  stream: # streamed answers, after their first content (the deadline no longer applies)
+    idle_timeout: 30 # longest silence allowed between two events of the provider
+    max_duration: 600 # longest time a stream may last
 
 tenants:
   # Quotas of each tenant (client application), on top of the provider limits.

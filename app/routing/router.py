@@ -9,7 +9,7 @@ from enum import StrEnum
 from http import HTTPStatus
 from typing import Any
 
-from app.config import Target
+from app.config import StreamSection, Target
 from app.providers.base import (
     ContextTooLarge,
     InvalidRequest,
@@ -103,6 +103,7 @@ class Outcome(StrEnum):
     SKIPPED_COOLDOWN = "skipped_cooldown"
     SKIPPED_BREAKER = "skipped_breaker"
     SKIPPED_QUOTA = "skipped_quota"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,7 @@ class Router:
         deadline: float,
         min_attempt_time: float,
         default_completion_tokens: int,
+        stream_limits: StreamSection,
     ) -> None:
         self._routes = routes
         self._providers = providers
@@ -235,6 +237,7 @@ class Router:
         self._deadline = deadline
         self._min_attempt_time = min_attempt_time
         self._default_completion_tokens = default_completion_tokens
+        self._stream_limits = stream_limits
 
     async def route(
         self,
@@ -339,7 +342,30 @@ class Router:
                     )
                 )
 
-            return CommittedStream(call.target, call.index, read_so_far, stream, on_end)
+            async def on_interrupted(reason: str) -> None:
+                await self._gate.record_stream_interrupted(call.target, call.reservation)
+                attempts.append(
+                    Attempt(
+                        call.target,
+                        Outcome.INTERRUPTED,
+                        latency_ms=call.elapsed_ms(),
+                        # The client did receive a 200 before the stream broke.
+                        status_code=HTTPStatus.OK,
+                        error_message=reason,
+                        estimated_tokens=call.reservation.tokens,
+                        degraded=call.reservation.degraded,
+                    )
+                )
+
+            return CommittedStream(
+                call.target,
+                call.index,
+                read_so_far,
+                stream,
+                limits=self._stream_limits,
+                on_end=on_end,
+                on_interrupted=on_interrupted,
+            )
 
         return await self._try_targets(
             alias, body, attempts=attempts, redis_down=redis_down, answer=answer

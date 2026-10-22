@@ -120,12 +120,26 @@ class BreakerSection(_FileModel):
     """Seconds the breaker stays open before it lets a single trial call through."""
 
 
+class StreamSection(_FileModel):
+    """Limits of a streamed answer after its first content, in seconds.
+
+    Before the first content, the model timeout and the request deadline apply as
+    usual. After it, the deadline would cut long answers, so these replace it.
+    """
+
+    idle_timeout: float = Field(default=30.0, gt=0)
+    """Longest silence allowed between two events of the provider."""
+    max_duration: float = Field(default=600.0, gt=0)
+    """Longest time a stream may last after its first content."""
+
+
 class GatewaySection(_FileModel):
     deadline: float = Field(default=60.0, gt=0)
     min_attempt_time: float = Field(default=1.0, gt=0)
     default_completion_tokens: int = Field(default=512, gt=0)
     cooldown: CooldownSection = CooldownSection()
     breaker: BreakerSection = BreakerSection()
+    stream: StreamSection = StreamSection()
 
     @model_validator(mode="after")
     def _attempts_fit_in_deadline(self) -> "GatewaySection":
@@ -189,6 +203,7 @@ class GatewayConfig:
     default_completion_tokens: int
     cooldown: CooldownSection
     breaker: BreakerSection
+    stream: StreamSection
     tenant_default_limits: TenantLimits
     routes: Mapping[str, tuple[Target, ...]]
     enabled_providers: tuple[str, ...]
@@ -211,6 +226,7 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
         default_completion_tokens=file_config.gateway.default_completion_tokens,
         cooldown=file_config.gateway.cooldown,
         breaker=file_config.gateway.breaker,
+        stream=file_config.gateway.stream,
         tenant_default_limits=file_config.tenants.default_limits,
         routes=_resolve_routes(file_config, providers),
         enabled_providers=tuple(providers),

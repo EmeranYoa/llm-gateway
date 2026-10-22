@@ -181,6 +181,20 @@ class TargetGate:
             used_tokens=_or_unknown(used_tokens),
         )
 
+    async def record_stream_interrupted(self, target: Target, reservation: Reservation) -> None:
+        """A stream broke after its first content: the provider failed mid-answer.
+
+        Counts as a breaker failure. The tokens stay reserved: part of the answer
+        was generated, and sent to the client.
+        """
+        await self._record(
+            target,
+            replace(reservation, is_trial=False),
+            cooldown="none",
+            tokens="keep",
+            breaker="failure",
+        )
+
     async def record_rate_limited(
         self, target: Target, reservation: Reservation, retry_after: float | None
     ) -> float | None:
