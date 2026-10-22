@@ -6,7 +6,7 @@ import respx
 from httpx import AsyncClient
 
 from tests.conftest import new_api_key
-from tests.upstream import GROQ_URL, completion_body
+from tests.upstream import GROQ_URL, chunk, completion_body, stream_response
 
 
 @pytest.fixture
@@ -39,3 +39,20 @@ async def test_sdk_raises_typed_error_for_unknown_alias(sdk: openai.AsyncOpenAI)
         )
 
     assert error.value.code == "model_not_found"
+
+
+async def test_sdk_streams_a_chat_completion(
+    sdk: openai.AsyncOpenAI, respx_mock: respx.MockRouter
+) -> None:
+    respx_mock.post(GROQ_URL).mock(
+        return_value=stream_response(
+            chunk(role="assistant", content=""), chunk("Hel"), chunk("lo"), "[DONE]"
+        )
+    )
+
+    stream = await sdk.chat.completions.create(
+        model="chat-fast", messages=[{"role": "user", "content": "Hi"}], stream=True
+    )
+    text = "".join([part.choices[0].delta.content or "" async for part in stream])
+
+    assert text == "Hello"

@@ -1,16 +1,18 @@
 """HTTP routes of the gateway."""
 
 import datetime as dt
+import json
 import math
+from collections.abc import AsyncIterator
 from typing import Annotated, Any, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.auth.authenticator import Authenticator
-from app.config import GatewayConfig
+from app.config import GatewayConfig, Target
 from app.routing.acquisition import (
     TargetGate,
     TenantAdmission,
@@ -31,6 +33,7 @@ from app.routing.router import (
     TargetRejectedRequest,
     UnknownAlias,
 )
+from app.routing.streaming import CommittedStream
 from app.schemas import ChatCompletionRequest, ErrorBody, ErrorDetail
 from app.storage.tenants import KeyOwner
 from app.storage.usage import UsageLog
@@ -146,13 +149,16 @@ async def chat_completions(
     tenant_gate: Annotated[TenantGate, Depends(get_tenant_gate)],
     gateway_router: Annotated[Router, Depends(get_router)],
     usage_log: Annotated[UsageLog, Depends(get_usage_log)],
-) -> dict[str, Any] | JSONResponse:
+) -> dict[str, Any] | JSONResponse | StreamingResponse:
     """Route an OpenAI chat completion request to a provider/model target.
 
     The tenant quotas are checked first: a tenant over its quota gets a 429 and
     no provider is called. Every examined target is written to the usage log
     after the response is sent, whether the request succeeds or ends in an error.
     A request refused by its tenant quota is logged as one row without a target.
+
+    With `stream: true`, the answer is a Server-Sent Events stream in OpenAI
+    format, sent once a target has produced its first content (the commit point).
     """
     request_id = uuid4().hex
     received_at = dt.datetime.now(dt.UTC)
@@ -175,7 +181,8 @@ async def chat_completions(
         return refused
     attempts: list[Attempt] = []
     result = await _route(gateway_router, request, attempts, redis_down=admission.degraded)
-    await _record_tenant_outcome(tenant_gate, admission, result, attempts)
+    if not isinstance(result, CommittedStream):
+        await _record_tenant_outcome(tenant_gate, admission, result, attempts)
     background_tasks.add_task(
         usage_log.write,
         request_id=request_id,
@@ -188,11 +195,35 @@ async def chat_completions(
     if isinstance(result, JSONResponse):
         result.headers["X-Gateway-Request-Id"] = request_id
         return result
+    if isinstance(result, CommittedStream):
+        # The usage log task runs once the whole stream has been sent.
+        return StreamingResponse(
+            _sse_events(result),
+            media_type="text/event-stream",
+            headers=_routing_headers(result.target, result.fallbacks, request_id),
+        )
     response.headers["X-Gateway-Provider"] = result.target.provider.name
     response.headers["X-Gateway-Model"] = result.target.model
     response.headers["X-Gateway-Fallbacks"] = str(result.fallbacks)
     response.headers["X-Gateway-Request-Id"] = request_id
     return result.body
+
+
+def _routing_headers(target: Target, fallbacks: int, request_id: str) -> dict[str, str]:
+    return {
+        "X-Gateway-Provider": target.provider.name,
+        "X-Gateway-Model": target.model,
+        "X-Gateway-Fallbacks": str(fallbacks),
+        "X-Gateway-Request-Id": request_id,
+    }
+
+
+async def _sse_events(stream: CommittedStream) -> AsyncIterator[str]:
+    """Send each chunk as a Server-Sent Event, with `model` set to the real model."""
+    async for chunk in stream.chunks():
+        payload = {**chunk, "model": stream.target.model}
+        yield f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def _tenant_quota_response(exc: TenantQuotaExceeded) -> JSONResponse:
@@ -246,18 +277,11 @@ async def _route(
     attempts: list[Attempt],
     *,
     redis_down: bool,
-) -> RoutedResponse | JSONResponse:
+) -> RoutedResponse | CommittedStream | JSONResponse:
     """Route the request, or build the OpenAI error response that explains why it failed."""
-    if request.stream:
-        return error_response(
-            400,
-            "Streaming is not supported yet.",
-            "invalid_request_error",
-            param="stream",
-            code="unsupported_parameter",
-        )
+    route = gateway_router.route_stream if request.stream else gateway_router.route
     try:
-        return await gateway_router.route(
+        return await route(
             request.model,
             request.model_dump(exclude_unset=True),
             attempts=attempts,

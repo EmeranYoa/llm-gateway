@@ -6,7 +6,9 @@ Ollama: only the base URL and the API key change.
 
 import datetime as dt
 import email.utils
+import json
 import re
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -20,6 +22,7 @@ from app.providers.base import (
     ProviderTimeout,
     ProviderUnavailable,
     RateLimited,
+    StreamChunk,
     TargetMisconfigured,
 )
 
@@ -61,17 +64,7 @@ class OpenAICompatibleProvider(Provider):
             raise ProviderTimeout() from exc
         except httpx.TransportError as exc:
             raise ProviderUnavailable(f"network error ({type(exc).__name__})") from exc
-        if response.status_code == 429:
-            raise RateLimited(retry_after=_retry_after(response))
-        if response.status_code in (401, 403, 404):
-            raise TargetMisconfigured(response.status_code)
-        if response.status_code >= 500:
-            raise ProviderUnavailable(f"HTTP {response.status_code}", response.status_code)
-        if response.status_code >= 400:
-            error = _invalid_request(response)
-            if _is_context_too_large(error):
-                raise ContextTooLarge(error.status_code) from error
-            raise error
+        _raise_for_error_status(response)
         body = response.json()
         usage = body.get("usage") if isinstance(body, dict) else None
         if not isinstance(usage, dict):
@@ -82,10 +75,65 @@ class OpenAICompatibleProvider(Provider):
             completion_tokens=_int_or_none(usage.get("completion_tokens")),
         )
 
+    async def stream_chat_completion(
+        self,
+        model: str,
+        body: dict[str, Any],
+        timeout: float,  # noqa: ASYNC109 (see Provider.chat_completion)
+    ) -> AsyncIterator[StreamChunk]:
+        try:
+            async with self._http_client.stream(
+                "POST",
+                f"{self._settings.base_url}/chat/completions",
+                json={**body, "model": model},
+                headers=self._auth_headers(),
+                timeout=timeout,
+            ) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    _raise_for_error_status(response)
+                async for data in _sse_data(response.aiter_lines()):
+                    if data == "[DONE]":
+                        return
+                    yield StreamChunk(json.loads(data))
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeout() from exc
+        except httpx.TransportError as exc:
+            raise ProviderUnavailable(f"network error ({type(exc).__name__})") from exc
+
     def _auth_headers(self) -> dict[str, str]:
         if self._settings.api_key is None:
             return {}
         return {"Authorization": f"Bearer {self._settings.api_key.get_secret_value()}"}
+
+
+def _raise_for_error_status(response: httpx.Response) -> None:
+    """Translate an HTTP error status into one of the common provider error types."""
+    if response.status_code == 429:
+        raise RateLimited(retry_after=_retry_after(response))
+    if response.status_code in (401, 403, 404):
+        raise TargetMisconfigured(response.status_code)
+    if response.status_code >= 500:
+        raise ProviderUnavailable(f"HTTP {response.status_code}", response.status_code)
+    if response.status_code >= 400:
+        error = _invalid_request(response)
+        if _is_context_too_large(error):
+            raise ContextTooLarge(error.status_code) from error
+        raise error
+
+
+async def _sse_data(lines: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Yield the `data` of each Server-Sent Event. Comments (`: ...`) are keep-alives."""
+    data_lines: list[str] = []
+    async for line in lines:
+        if line.startswith("data:"):
+            data_lines.append(line.removeprefix("data:").removeprefix(" "))
+        elif not line and data_lines:
+            # A blank line ends the event.
+            yield "\n".join(data_lines)
+            data_lines = []
+    if data_lines:
+        yield "\n".join(data_lines)
 
 
 def _invalid_request(response: httpx.Response) -> InvalidRequest:

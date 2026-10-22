@@ -23,6 +23,7 @@ from app.providers.base import (
 )
 from app.routing.acquisition import Refusal, Reservation, TargetGate
 from app.routing.quotas import estimate_call_tokens, estimate_prompt_tokens
+from app.routing.streaming import CommittedStream
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +344,67 @@ class Router:
         if all(isinstance(error, ContextTooLarge) for _, error in failures):
             raise RequestTooLarge(alias)
         raise AllTargetsFailed(alias, failures, retry_after=min(waits, default=None))
+
+    async def route_stream(
+        self,
+        alias: str,
+        body: dict[str, Any],
+        *,
+        attempts: list[Attempt],
+        redis_down: bool = False,
+    ) -> CommittedStream:
+        """Stream the answer of the first target of `alias`.
+
+        Chunks are read until the first one with content (the commit point),
+        then the target is fixed and the caller relays the stream to the client.
+        The attempt is appended to `attempts` when the stream ends.
+
+        Raises the same errors as `route`.
+        """
+        targets = self._routes.get(alias)
+        if targets is None:
+            raise UnknownAlias(alias)
+        if not targets:
+            raise NoEnabledTarget(alias)
+        target = targets[0]
+        prompt_tokens = estimate_prompt_tokens(body)
+        estimated_tokens = estimate_call_tokens(
+            prompt_tokens, body, self._default_completion_tokens, target.limits.tpm
+        )
+        attempt_timeout = min(target.limits.timeout, self._deadline)
+        if redis_down:
+            acquired: Reservation | Refusal = Reservation.without_redis(estimated_tokens)
+        else:
+            acquired = await self._gate.acquire(target, estimated_tokens, attempt_timeout)
+        if isinstance(acquired, Refusal):
+            attempts.append(
+                Attempt.skipped(target, _skip_outcome(acquired), str(acquired), estimated_tokens)
+            )
+            raise AllTargetsFailed(alias, [(target, acquired)], retry_after=acquired.wait_seconds)
+        reservation = acquired
+        provider = self._providers[target.provider.name]
+        started = time.perf_counter()
+        stream = provider.stream_chat_completion(target.model, body, timeout=attempt_timeout)
+        read_so_far = []
+        async for chunk in stream:
+            read_so_far.append(chunk)
+            if chunk.has_content:
+                break
+
+        async def on_end() -> None:
+            await self._gate.record_success(target, reservation, None)
+            attempts.append(
+                Attempt(
+                    target,
+                    Outcome.SUCCESS,
+                    latency_ms=_elapsed_ms(started),
+                    status_code=HTTPStatus.OK,
+                    estimated_tokens=reservation.tokens,
+                    degraded=reservation.degraded,
+                )
+            )
+
+        return CommittedStream(target, 0, read_so_far, stream, on_end)
 
     async def _record_failure(
         self, target: Target, reservation: Reservation, error: ProviderError

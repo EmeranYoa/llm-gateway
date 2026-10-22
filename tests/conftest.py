@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+import uvicorn
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
@@ -307,3 +308,30 @@ async def run_admin(database_url: str, *args: str) -> str:
     run = await run_admin_command(database_url, *args)
     assert run.exit_code == 0, run.stderr
     return run.stdout
+
+
+@asynccontextmanager
+async def live_gateway(
+    settings: Settings, api_key: str | None = NEW_KEY
+) -> AsyncIterator[AsyncClient]:
+    """Serve a gateway with uvicorn on a free local port and yield a client for it.
+
+    Unlike `gateway_client`, a real HTTP server sends a stream event by event, so
+    tests can see when each event reaches the client, or close the connection early.
+    """
+    if api_key == NEW_KEY:
+        api_key = await new_api_key(settings.database_url)
+    headers = {} if api_key is None else {"Authorization": f"Bearer {api_key}"}
+    server = uvicorn.Server(
+        uvicorn.Config(create_app(settings), host="127.0.0.1", port=0, log_level="warning")
+    )
+    serving = asyncio.create_task(server.serve())
+    while not server.started:  # noqa: ASYNC110 (uvicorn only exposes a `started` flag)
+        await asyncio.sleep(0.01)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        async with AsyncClient(base_url=f"http://127.0.0.1:{port}", headers=headers) as client:
+            yield client
+    finally:
+        server.should_exit = True
+        await serving

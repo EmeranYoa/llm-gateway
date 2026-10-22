@@ -1,6 +1,9 @@
 """Fake upstream provider used by API tests."""
 
+import json
 from typing import Any
+
+import httpx
 
 CHAT_CONFIG = """
 providers:
@@ -73,3 +76,47 @@ def error_body(
 ) -> dict[str, Any]:
     """An error body in OpenAI format, as an OpenAI-compatible provider returns it."""
     return {"error": {"message": message, "type": error_type, "param": None, "code": code}}
+
+
+# --- Streamed answers (Server-Sent Events) ---
+
+
+def chunk(
+    content: str | None = None,
+    *,
+    role: str | None = None,
+    reasoning: str | None = None,
+    model: str = "upstream",
+) -> dict[str, Any]:
+    """One chat completion chunk, as an OpenAI-compatible provider streams it."""
+    delta: dict[str, Any] = {}
+    if role is not None:
+        delta["role"] = role
+    if reasoning is not None:
+        delta["reasoning"] = reasoning
+    if content is not None:
+        delta["content"] = content
+    return {
+        "id": "chatcmpl-123",
+        "object": "chat.completion.chunk",
+        "created": 1_700_000_000,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+    }
+
+
+def sse(*events: dict[str, Any] | str) -> bytes:
+    """An SSE body: each event is a chunk (sent as JSON), a raw data string, or a comment."""
+    lines = []
+    for event in events:
+        if isinstance(event, str) and event.startswith(":"):
+            lines.append(f"{event}\n\n")
+        elif isinstance(event, str):
+            lines.append(f"data: {event}\n\n")
+        else:
+            lines.append(f"data: {json.dumps(event)}\n\n")
+    return "".join(lines).encode()
+
+
+def stream_response(*events: dict[str, Any] | str) -> httpx.Response:
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse(*events))

@@ -85,23 +85,6 @@ async def test_unknown_alias_returns_404_in_openai_format(chat_client: AsyncClie
     }
 
 
-async def test_streaming_is_refused_with_400(
-    chat_client: AsyncClient, respx_mock: respx.MockRouter
-) -> None:
-    upstream = respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
-
-    response = await chat_client.post("/v1/chat/completions", json={**CHAT_REQUEST, "stream": True})
-
-    assert response.status_code == 400
-    assert response.json()["error"] == {
-        "message": "Streaming is not supported yet.",
-        "type": "invalid_request_error",
-        "param": "stream",
-        "code": "unsupported_parameter",
-    }
-    assert not upstream.called
-
-
 async def test_alias_without_enabled_target_returns_503(chat_client: AsyncClient) -> None:
     response = await chat_client.post(
         "/v1/chat/completions", json={**CHAT_REQUEST, "model": "chat-offline"}

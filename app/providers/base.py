@@ -5,6 +5,7 @@ specific provider (URLs, headers, error formats).
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +27,35 @@ class ProviderResponse:
         if self.prompt_tokens is None or self.completion_tokens is None:
             return None
         return self.prompt_tokens + self.completion_tokens
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """One chunk of a streamed chat completion, as the provider sent it (OpenAI format)."""
+
+    data: dict[str, Any]
+
+    @property
+    def has_content(self) -> bool:
+        """True when the chunk carries output for the client: text, reasoning or a tool call.
+
+        The first chunk with content is the commit point of a stream: from then
+        on the client has received something, so the gateway can no longer fail over.
+        Reasoning counts: reasoning models think before they answer, and holding
+        their reasoning back would leave the client with nothing to show.
+        """
+        for choice in self.data.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta") or {}
+            if any(delta.get(field) for field in _CONTENT_FIELDS):
+                return True
+        return False
+
+
+# Fields of a stream delta that carry output for the client. Providers name the
+# reasoning of a model `reasoning` (Groq, OpenRouter) or `reasoning_content` (DeepSeek).
+_CONTENT_FIELDS = ("content", "reasoning", "reasoning_content", "tool_calls", "function_call")
 
 
 class ProviderError(Exception):
@@ -128,4 +158,18 @@ class Provider(ABC):
         HTTP client, which otherwise applies its own default timeout.
 
         Raises one of the `ProviderError` subclasses when the call fails.
+        """
+
+    @abstractmethod
+    def stream_chat_completion(
+        self,
+        model: str,
+        body: dict[str, Any],
+        timeout: float,
+    ) -> AsyncIterator[StreamChunk]:
+        """Run a streamed chat completion with `model` and yield its chunks in order.
+
+        `body` and `timeout` work as for `chat_completion`. Closing the iterator
+        closes the upstream call. Raises one of the `ProviderError` subclasses
+        when the call fails, before or during the stream.
         """
