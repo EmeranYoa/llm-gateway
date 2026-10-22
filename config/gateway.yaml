@@ -47,11 +47,10 @@ providers:
       # 50 requests per day for the whole account (1000 after buying 10 credits).
       "google/gemma-4-31b-it:free": { rpm: 20, rpd: 50 }
 
-  # Optional local model: an Ollama server you run yourself on the host machine
-  # (https://ollama.com), with `ollama pull llama3.2:3b`. Without it, this target
-  # simply fails over.
+  # Optional local model: docker compose --profile ollama up -d
+  # Without it, this target simply fails over.
   ollama:
-    base_url: http://host.docker.internal:11434/v1
+    base_url: http://ollama:11434/v1
     api_key_env: null
     models:
       "llama3.2:3b": { timeout: 120 } # last resort, no limits

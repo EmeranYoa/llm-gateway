@@ -85,7 +85,12 @@ docker compose up -d --build
 curl http://localhost:8000/health
 ```
 
-Ollama is optional. If you run [Ollama](https://ollama.com) on your machine (`ollama pull llama3.2:3b`), the gateway reaches it at `host.docker.internal:11434` as the last-resort target. On Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `gateway` service.
+No API key at all? Run the optional local model instead (about 2 GB to download):
+
+```bash
+docker compose --profile ollama up -d --build
+docker compose exec ollama ollama pull llama3.2:3b
+```
 
 Then call the gateway with the official OpenAI SDK, changing only `base_url`:
 

@@ -51,5 +51,15 @@ services:
       timeout: 3s
       retries: 5
 
+  # Optional local model, used as the last-resort target in config/gateway.yaml.
+  # Start it with: docker compose --profile ollama up -d
+  # Then download the model once: docker compose exec ollama ollama pull llama3.2:3b
+  ollama:
+    image: ollama/ollama:0.35.1
+    profiles: [ollama]
+    volumes:
+      - ollama-data:/root/.ollama
+
 volumes:
   postgres-data:
+  ollama-data:
