@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from http import HTTPStatus
@@ -19,6 +19,7 @@ from app.providers.base import (
     ProviderTimeout,
     ProviderUnavailable,
     RateLimited,
+    StreamChunk,
     TargetMisconfigured,
 )
 from app.routing.acquisition import Refusal, Reservation, TargetGate
@@ -274,6 +275,91 @@ class Router:
             AllTargetsFailed: every target failed or was skipped for another reason.
                 Its `retry_after` is the smallest known wait among those targets.
         """
+
+        async def answer(call: _Call) -> RoutedResponse:
+            response = await _call_with_timeout(
+                call.provider, call.target.model, body, call.timeout
+            )
+            await self._gate.record_success(call.target, call.reservation, response.total_tokens)
+            attempts.append(
+                Attempt.succeeded(call.target, response, call.elapsed_ms(), call.reservation)
+            )
+            return RoutedResponse(
+                body={**response.body, "model": call.target.model},
+                target=call.target,
+                fallbacks=call.index,
+                used_tokens=response.total_tokens,
+            )
+
+        return await self._try_targets(
+            alias, body, attempts=attempts, redis_down=redis_down, answer=answer
+        )
+
+    async def route_stream(
+        self,
+        alias: str,
+        body: dict[str, Any],
+        *,
+        attempts: list[Attempt],
+        redis_down: bool = False,
+    ) -> CommittedStream:
+        """Like `route`, for a streamed answer: fail over until a target sends content.
+
+        Each target is tried as in `route`, but its answer is read only until its
+        first chunk with content: the commit point. Any error before it fails over
+        as usual, including an error event sent after a 200. At the commit point,
+        the target is fixed, the breaker records a success, and the caller relays
+        the stream. The tokens are corrected and the attempt appended to
+        `attempts` when the stream ends.
+
+        Raises the same errors as `route`.
+        """
+
+        async def answer(call: _Call) -> CommittedStream:
+            stream = call.provider.stream_chat_completion(
+                call.target.model, body, timeout=call.timeout
+            )
+            try:
+                read_so_far = await _read_until_content(stream, call.timeout)
+            except BaseException:
+                await stream.aclose()
+                raise
+            await self._gate.record_commit(call.target, call.reservation)
+
+            async def on_end() -> None:
+                await self._gate.record_stream_end(call.target, call.reservation, None)
+                attempts.append(
+                    Attempt(
+                        call.target,
+                        Outcome.SUCCESS,
+                        latency_ms=call.elapsed_ms(),
+                        status_code=HTTPStatus.OK,
+                        estimated_tokens=call.reservation.tokens,
+                        degraded=call.reservation.degraded,
+                    )
+                )
+
+            return CommittedStream(call.target, call.index, read_so_far, stream, on_end)
+
+        return await self._try_targets(
+            alias, body, attempts=attempts, redis_down=redis_down, answer=answer
+        )
+
+    async def _try_targets[T](
+        self,
+        alias: str,
+        body: dict[str, Any],
+        *,
+        attempts: list[Attempt],
+        redis_down: bool,
+        answer: Callable[["_Call"], Awaitable[T]],
+    ) -> T:
+        """The failover loop shared by `route` and `route_stream`.
+
+        For each target: skip it or reserve its quota, then call `answer`, which
+        talks to the provider, records the success and returns the result. A
+        provider error raised by `answer` is recorded here and fails over.
+        """
         targets = self._routes.get(alias)
         if targets is None:
             raise UnknownAlias(alias)
@@ -315,16 +401,22 @@ class Router:
                 failures.append((target, acquired))
                 waits.append(acquired.wait_seconds)
                 continue
-            provider = self._providers[target.provider.name]
-            started = time.perf_counter()
+            call = _Call(
+                index=index,
+                target=target,
+                provider=self._providers[target.provider.name],
+                reservation=acquired,
+                timeout=attempt_timeout,
+                started=time.perf_counter(),
+            )
             try:
-                response = await _call_with_timeout(provider, target.model, body, attempt_timeout)
+                return await answer(call)
             except InvalidRequest as error:
-                attempts.append(Attempt.failed(target, error, _elapsed_ms(started), acquired))
+                attempts.append(Attempt.failed(target, error, call.elapsed_ms(), acquired))
                 await self._record_failure(target, acquired, error)
                 raise TargetRejectedRequest(target, error) from error
             except ProviderError as error:
-                attempts.append(Attempt.failed(target, error, _elapsed_ms(started), acquired))
+                attempts.append(Attempt.failed(target, error, call.elapsed_ms(), acquired))
                 failures.append((target, error))
                 cooldown = await self._record_failure(target, acquired, error)
                 if cooldown is not None:
@@ -333,78 +425,9 @@ class Router:
                     # The deadline cut this attempt short, not the model's own timeout.
                     raise DeadlineExceeded(alias, self._deadline, failures) from error
                 continue
-            await self._gate.record_success(target, acquired, response.total_tokens)
-            attempts.append(Attempt.succeeded(target, response, _elapsed_ms(started), acquired))
-            return RoutedResponse(
-                body={**response.body, "model": target.model},
-                target=target,
-                fallbacks=index,
-                used_tokens=response.total_tokens,
-            )
         if all(isinstance(error, ContextTooLarge) for _, error in failures):
             raise RequestTooLarge(alias)
         raise AllTargetsFailed(alias, failures, retry_after=min(waits, default=None))
-
-    async def route_stream(
-        self,
-        alias: str,
-        body: dict[str, Any],
-        *,
-        attempts: list[Attempt],
-        redis_down: bool = False,
-    ) -> CommittedStream:
-        """Stream the answer of the first target of `alias`.
-
-        Chunks are read until the first one with content (the commit point),
-        then the target is fixed and the caller relays the stream to the client.
-        The attempt is appended to `attempts` when the stream ends.
-
-        Raises the same errors as `route`.
-        """
-        targets = self._routes.get(alias)
-        if targets is None:
-            raise UnknownAlias(alias)
-        if not targets:
-            raise NoEnabledTarget(alias)
-        target = targets[0]
-        prompt_tokens = estimate_prompt_tokens(body)
-        estimated_tokens = estimate_call_tokens(
-            prompt_tokens, body, self._default_completion_tokens, target.limits.tpm
-        )
-        attempt_timeout = min(target.limits.timeout, self._deadline)
-        if redis_down:
-            acquired: Reservation | Refusal = Reservation.without_redis(estimated_tokens)
-        else:
-            acquired = await self._gate.acquire(target, estimated_tokens, attempt_timeout)
-        if isinstance(acquired, Refusal):
-            attempts.append(
-                Attempt.skipped(target, _skip_outcome(acquired), str(acquired), estimated_tokens)
-            )
-            raise AllTargetsFailed(alias, [(target, acquired)], retry_after=acquired.wait_seconds)
-        reservation = acquired
-        provider = self._providers[target.provider.name]
-        started = time.perf_counter()
-        stream = provider.stream_chat_completion(target.model, body, timeout=attempt_timeout)
-        read_so_far = []
-        async for chunk in stream:
-            read_so_far.append(chunk)
-            if chunk.has_content:
-                break
-
-        async def on_end() -> None:
-            await self._gate.record_success(target, reservation, None)
-            attempts.append(
-                Attempt(
-                    target,
-                    Outcome.SUCCESS,
-                    latency_ms=_elapsed_ms(started),
-                    status_code=HTTPStatus.OK,
-                    estimated_tokens=reservation.tokens,
-                    degraded=reservation.degraded,
-                )
-            )
-
-        return CommittedStream(target, 0, read_so_far, stream, on_end)
 
     async def _record_failure(
         self, target: Target, reservation: Reservation, error: ProviderError
@@ -450,6 +473,42 @@ async def _call_with_timeout(
 
 def _describe_failures(failures: list[tuple[Target, ProviderError | Refusal]]) -> str:
     return "; ".join(f"{target.name}: {error}" for target, error in failures)
+
+
+@dataclass(frozen=True)
+class _Call:
+    """One call to a target whose quota is reserved."""
+
+    index: int
+    """Position of the target in the alias: the number of targets examined before it."""
+    target: Target
+    provider: Provider
+    reservation: Reservation
+    timeout: float
+    started: float
+
+    def elapsed_ms(self) -> int:
+        return _elapsed_ms(self.started)
+
+
+async def _read_until_content(
+    stream: AsyncGenerator[StreamChunk], attempt_timeout: float
+) -> list[StreamChunk]:
+    """Read a stream until its first chunk with content (the commit point).
+
+    Gives up with `ProviderTimeout` when no content arrives within `attempt_timeout`.
+    A stream that ends without content returns what it sent: an empty answer.
+    """
+    read_so_far: list[StreamChunk] = []
+    try:
+        async with asyncio.timeout(attempt_timeout):
+            async for chunk in stream:
+                read_so_far.append(chunk)
+                if chunk.has_content:
+                    break
+    except TimeoutError as error:
+        raise ProviderTimeout() from error
+    return read_so_far
 
 
 def _elapsed_ms(started: float) -> int:

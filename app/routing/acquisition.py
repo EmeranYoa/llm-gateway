@@ -17,7 +17,7 @@ is unavailable, both gates let requests through without checks (ADR 0002).
 import datetime as dt
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -151,6 +151,33 @@ class TargetGate:
             cooldown="success",
             tokens="correct",
             breaker="success",
+            used_tokens=_or_unknown(used_tokens),
+        )
+
+    async def record_commit(self, target: Target, reservation: Reservation) -> None:
+        """A stream reached its first content: the provider works.
+
+        Counts as a breaker success and resets the 429 streak now, so a half-open
+        trial ends within its slot TTL however long the stream lasts. The tokens
+        stay reserved until the end of the stream (`record_stream_end`).
+        """
+        await self._record(
+            target, reservation, cooldown="success", tokens="keep", breaker="success"
+        )
+
+    async def record_stream_end(
+        self, target: Target, reservation: Reservation, used_tokens: int | None
+    ) -> None:
+        """Replace the token estimate of a finished stream with its real usage.
+
+        The breaker result was already recorded at the commit point.
+        """
+        await self._record(
+            target,
+            replace(reservation, is_trial=False),
+            cooldown="none",
+            tokens="correct",
+            breaker="neutral",
             used_tokens=_or_unknown(used_tokens),
         )
 

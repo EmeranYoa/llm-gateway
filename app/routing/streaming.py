@@ -6,7 +6,7 @@ router returns once a target has sent content: the target is fixed, and the
 client receives the chunks already read, then the rest of the stream.
 """
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
 from app.config import Target
@@ -21,7 +21,7 @@ class CommittedStream:
         target: Target,
         fallbacks: int,
         read_so_far: Sequence[StreamChunk],
-        rest: AsyncIterator[StreamChunk],
+        rest: AsyncGenerator[StreamChunk],
         on_end: Callable[[], Awaitable[None]],
     ) -> None:
         self.target = target

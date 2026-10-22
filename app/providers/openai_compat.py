@@ -8,7 +8,7 @@ import datetime as dt
 import email.utils
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
 import httpx
@@ -18,6 +18,7 @@ from app.providers.base import (
     ContextTooLarge,
     InvalidRequest,
     Provider,
+    ProviderError,
     ProviderResponse,
     ProviderTimeout,
     ProviderUnavailable,
@@ -80,7 +81,7 @@ class OpenAICompatibleProvider(Provider):
         model: str,
         body: dict[str, Any],
         timeout: float,  # noqa: ASYNC109 (see Provider.chat_completion)
-    ) -> AsyncIterator[StreamChunk]:
+    ) -> AsyncGenerator[StreamChunk]:
         try:
             async with self._http_client.stream(
                 "POST",
@@ -95,7 +96,10 @@ class OpenAICompatibleProvider(Provider):
                 async for data in _sse_data(response.aiter_lines()):
                     if data == "[DONE]":
                         return
-                    yield StreamChunk(json.loads(data))
+                    event = json.loads(data)
+                    if isinstance(event, dict) and "error" in event:
+                        raise _stream_error(event["error"])
+                    yield StreamChunk(event)
         except httpx.TimeoutException as exc:
             raise ProviderTimeout() from exc
         except httpx.TransportError as exc:
@@ -120,6 +124,33 @@ def _raise_for_error_status(response: httpx.Response) -> None:
         if _is_context_too_large(error):
             raise ContextTooLarge(error.status_code) from error
         raise error
+
+
+def _stream_error(error: object) -> ProviderError:
+    """Translate an error event sent inside a stream into a common provider error type.
+
+    Some providers (OpenRouter, for example) answer 200 and then send the error as
+    an event, with an HTTP-like `code`. The upstream text is not reused, except for
+    a client error, where the client needs it.
+    """
+    detail = error if isinstance(error, dict) else {}
+    code = detail.get("code")
+    status = code if isinstance(code, int) else None
+    if status == 429:
+        return RateLimited(retry_after=None)
+    if status in (401, 403, 404):
+        return TargetMisconfigured(status)
+    if status is None or status < 400 or status >= 500:
+        return ProviderUnavailable(f"error event in the stream (code {code})", status)
+    invalid = InvalidRequest(
+        status,
+        message=_text_or_none(detail.get("message")) or f"HTTP {status}",
+        error_type=_text_or_none(detail.get("type")) or "invalid_request_error",
+        param=_text_or_none(detail.get("param")),
+    )
+    if _is_context_too_large(invalid):
+        return ContextTooLarge(status)
+    return invalid
 
 
 async def _sse_data(lines: AsyncIterator[str]) -> AsyncIterator[str]:

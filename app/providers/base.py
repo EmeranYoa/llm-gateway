@@ -5,7 +5,7 @@ specific provider (URLs, headers, error formats).
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 
@@ -166,7 +166,7 @@ class Provider(ABC):
         model: str,
         body: dict[str, Any],
         timeout: float,
-    ) -> AsyncIterator[StreamChunk]:
+    ) -> AsyncGenerator[StreamChunk]:
         """Run a streamed chat completion with `model` and yield its chunks in order.
 
         `body` and `timeout` work as for `chat_completion`. Closing the iterator
