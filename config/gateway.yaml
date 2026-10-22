@@ -19,9 +19,10 @@ gateway:
 tenants:
   # Quotas of each tenant (client application), on top of the provider limits.
   # A missing limit means "no limit". Override them per tenant with:
-  #   python -m app.admin set-limits --tenant NAME --rpm N
+  #   python -m app.admin set-limits --tenant NAME [--rpm N] [--tokens-per-day N]
   default_limits:
     rpm: 60 # requests per minute, sliding 60 s window; failed requests count too
+    tokens_per_day: 500000 # prompt + completion tokens, reset every day at 00:00 UTC
 
 providers:
   # https://console.groq.com/docs/rate-limits (free plan)

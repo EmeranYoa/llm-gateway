@@ -1,7 +1,7 @@
 """Python side of quota tracking: token estimates and the daily reset time.
 
 The quota counters themselves live in Redis and are checked by the
-`acquire_target` Lua script (see `acquisition.py`). Timezone maths is done
+`acquire_target` and `acquire_tenant` Lua scripts (see `acquisition.py`). Timezone maths is done
 here, because Lua in Redis has no timezone support.
 """
 

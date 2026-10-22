@@ -34,6 +34,8 @@ class TenantRow(Base):
     name: Mapped[str] = mapped_column(Text, unique=True)
     rpm: Mapped[int | None]
     """Requests per minute of the tenant, or NULL to use the default of `gateway.yaml`."""
+    tokens_per_day: Mapped[int | None] = mapped_column(BigInteger)
+    """Daily token budget of the tenant, or NULL to use the default of `gateway.yaml`."""
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -75,22 +77,33 @@ class NewApiKey:
 
 
 async def create_api_key(
-    engine: AsyncEngine, tenant_name: str, *, rpm: int | None = None
+    engine: AsyncEngine,
+    tenant_name: str,
+    *,
+    rpm: int | None = None,
+    tokens_per_day: int | None = None,
 ) -> NewApiKey:
     """Create a key for `tenant_name`, creating the tenant first if it does not exist.
 
-    `rpm`, when given, becomes the tenant's own requests-per-minute limit.
+    `rpm` and `tokens_per_day`, when given, become the tenant's own limits.
     """
     key = generate_key()
     now = dt.datetime.now(dt.UTC)
     # Insert the tenant, or, if it exists already, update only the limits given.
-    new_tenant = postgresql.insert(TenantRow).values(name=tenant_name, rpm=rpm, created_at=now)
+    new_tenant = postgresql.insert(TenantRow).values(
+        name=tenant_name, rpm=rpm, tokens_per_day=tokens_per_day, created_at=now
+    )
     upsert_tenant = new_tenant.on_conflict_do_update(
         index_elements=[TenantRow.name],
-        set_={"rpm": func.coalesce(new_tenant.excluded.rpm, TenantRow.rpm)},
-    ).returning(TenantRow.id, TenantRow.rpm)
+        set_={
+            "rpm": func.coalesce(new_tenant.excluded.rpm, TenantRow.rpm),
+            "tokens_per_day": func.coalesce(
+                new_tenant.excluded.tokens_per_day, TenantRow.tokens_per_day
+            ),
+        },
+    ).returning(TenantRow.id, TenantRow.rpm, TenantRow.tokens_per_day)
     async with engine.begin() as connection:
-        tenant_id, own_rpm = (await connection.execute(upsert_tenant)).one()
+        tenant_id, own_rpm, own_tokens_per_day = (await connection.execute(upsert_tenant)).one()
         api_key_id = await connection.scalar(
             insert(ApiKeyRow)
             .values(
@@ -102,19 +115,34 @@ async def create_api_key(
             .returning(ApiKeyRow.id)
         )
     assert api_key_id is not None
-    owner = KeyOwner(api_key_id, tenant_id, tenant_name, TenantLimits(rpm=own_rpm))
+    limits = TenantLimits(rpm=own_rpm, tokens_per_day=own_tokens_per_day)
+    owner = KeyOwner(api_key_id, tenant_id, tenant_name, limits)
     return NewApiKey(key=key, owner=owner)
 
 
-async def set_tenant_limits(engine: AsyncEngine, tenant_name: str, *, rpm: int) -> bool:
-    """Set the tenant's own requests-per-minute limit. Returns False for an unknown tenant.
+async def set_tenant_limits(
+    engine: AsyncEngine,
+    tenant_name: str,
+    *,
+    rpm: int | None = None,
+    tokens_per_day: int | None = None,
+) -> bool:
+    """Set the tenant's own limits. Returns False for an unknown tenant.
 
-    Gateways see the new limit when their key cache expires (`AUTH_CACHE_TTL`).
+    Only the limits given are changed; at least one must be given. Gateways see
+    the new limits when their key cache expires (`AUTH_CACHE_TTL`).
     """
+    new_limits = {
+        column: value
+        for column, value in {"rpm": rpm, "tokens_per_day": tokens_per_day}.items()
+        if value is not None
+    }
+    if not new_limits:
+        raise ValueError("no limit to set")
     statement = (
         update(TenantRow)
         .where(TenantRow.name == tenant_name)
-        .values(rpm=rpm)
+        .values(**new_limits)
         .returning(TenantRow.id)
     )
     async with engine.begin() as connection:
@@ -198,11 +226,14 @@ async def find_key_owner(engine: AsyncEngine, key: str) -> KeyOwner | None:
             ApiKeyRow.revoked_at.is_(None),
         )
         .values(last_used_at=dt.datetime.now(dt.UTC))
-        .returning(ApiKeyRow.id, TenantRow.id, TenantRow.name, TenantRow.rpm)
+        .returning(
+            ApiKeyRow.id, TenantRow.id, TenantRow.name, TenantRow.rpm, TenantRow.tokens_per_day
+        )
     )
     async with engine.begin() as connection:
         row = (await connection.execute(query)).first()
     if row is None:
         return None
-    api_key_id, tenant_id, tenant_name, rpm = row
-    return KeyOwner(api_key_id, tenant_id, tenant_name, TenantLimits(rpm=rpm))
+    api_key_id, tenant_id, tenant_name, rpm, tokens_per_day = row
+    limits = TenantLimits(rpm=rpm, tokens_per_day=tokens_per_day)
+    return KeyOwner(api_key_id, tenant_id, tenant_name, limits)

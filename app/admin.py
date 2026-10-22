@@ -1,10 +1,10 @@
 """Admin command line: manage tenants and their gateway API keys.
 
 Usage:
-    python -m app.admin create-key --tenant acme [--rpm 60]
+    python -m app.admin create-key --tenant acme [--rpm 60] [--tokens-per-day 200000]
     python -m app.admin list-keys [--tenant acme]
     python -m app.admin revoke-key 12
-    python -m app.admin set-limits --tenant acme --rpm 120
+    python -m app.admin set-limits --tenant acme [--rpm 120] [--tokens-per-day 500000]
 
 A full key is printed only once, by create-key. Other commands show a short prefix.
 It uses the same `DATABASE_URL` as the gateway.
@@ -40,7 +40,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "create-key", help="create an API key (and the tenant if needed), and print it once"
     )
     create.add_argument("--tenant", required=True, help="tenant name, for example acme")
-    create.add_argument("--rpm", type=_positive_int, help="requests per minute of the tenant")
+    _add_limit_arguments(create)
 
     list_keys = commands.add_parser(
         "list-keys", help="list API keys with their prefix and status, never the full key"
@@ -54,26 +54,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         "set-limits", help="set the tenant's own limits, instead of the defaults of gateway.yaml"
     )
     set_limits.add_argument("--tenant", required=True, help="tenant name")
-    set_limits.add_argument(
-        "--rpm", type=_positive_int, required=True, help="requests per minute of the tenant"
-    )
+    _add_limit_arguments(set_limits)
 
     args = parser.parse_args(argv)
+    if args.command == "set-limits" and args.rpm is None and args.tokens_per_day is None:
+        set_limits.error("give at least one limit: --rpm and/or --tokens-per-day")
     if args.command == "create-key":
-        return asyncio.run(_create_key(args.tenant, args.rpm))
+        return asyncio.run(_create_key(args.tenant, args.rpm, args.tokens_per_day))
     if args.command == "list-keys":
         return asyncio.run(_list_keys(args.tenant))
     if args.command == "revoke-key":
         return asyncio.run(_revoke_key(args.id))
     if args.command == "set-limits":
-        return asyncio.run(_set_limits(args.tenant, args.rpm))
+        return asyncio.run(_set_limits(args.tenant, args.rpm, args.tokens_per_day))
     return 1
 
 
-async def _create_key(tenant: str, rpm: int | None) -> int:
+def _add_limit_arguments(command: argparse.ArgumentParser) -> None:
+    """Add the tenant limit options. A limit left out keeps its current value."""
+    command.add_argument("--rpm", type=_positive_int, help="requests per minute of the tenant")
+    command.add_argument(
+        "--tokens-per-day",
+        type=_positive_int,
+        help="daily token budget of the tenant (prompt and completion), reset at 00:00 UTC",
+    )
+
+
+async def _create_key(tenant: str, rpm: int | None, tokens_per_day: int | None) -> int:
     engine = create_async_engine(Settings().database_url)
     try:
-        new_key = await create_api_key(engine, tenant, rpm=rpm)
+        new_key = await create_api_key(engine, tenant, rpm=rpm, tokens_per_day=tokens_per_day)
     finally:
         await engine.dispose()
     print(f"API key for tenant '{tenant}' (shown only once, store it now):")
@@ -108,16 +118,21 @@ async def _revoke_key(api_key_id: int) -> int:
     return 1
 
 
-async def _set_limits(tenant: str, rpm: int) -> int:
+async def _set_limits(tenant: str, rpm: int | None, tokens_per_day: int | None) -> int:
     engine = create_async_engine(Settings().database_url)
     try:
-        found = await set_tenant_limits(engine, tenant, rpm=rpm)
+        found = await set_tenant_limits(engine, tenant, rpm=rpm, tokens_per_day=tokens_per_day)
     finally:
         await engine.dispose()
     if not found:
         print(f"Error: unknown tenant '{tenant}'.", file=sys.stderr)
         return 1
-    print(f"Limits of tenant '{tenant}' updated: {rpm} requests per minute.")
+    changes = []
+    if rpm is not None:
+        changes.append(f"{rpm} requests per minute")
+    if tokens_per_day is not None:
+        changes.append(f"{tokens_per_day} tokens per day")
+    print(f"Limits of tenant '{tenant}' updated: {', '.join(changes)}.")
     return 0
 
 

@@ -72,7 +72,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.config = config
     gate = TargetGate(redis_client, config.cooldown, config.breaker)
     app.state.gate = gate
-    app.state.tenant_gate = TenantGate(redis_client, config.tenant_default_limits)
+    app.state.tenant_gate = TenantGate(
+        redis_client, config.tenant_default_limits, config.default_completion_tokens
+    )
     app.state.router = Router(
         config.routes,
         providers,

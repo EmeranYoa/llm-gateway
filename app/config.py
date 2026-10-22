@@ -140,6 +140,8 @@ class TenantLimits(_FileModel):
 
     rpm: int | None = Field(default=None, gt=0)
     """Requests per minute, over a 60 s sliding window."""
+    tokens_per_day: int | None = Field(default=None, gt=0)
+    """Daily token budget (prompt and completion), reset at 00:00 UTC."""
 
 
 class TenantsSection(_FileModel):

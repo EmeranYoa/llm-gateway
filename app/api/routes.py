@@ -11,12 +11,20 @@ from fastapi.responses import JSONResponse
 
 from app.auth.authenticator import Authenticator
 from app.config import GatewayConfig
-from app.routing.acquisition import TargetGate, TenantGate, TenantQuotaExceeded
+from app.routing.acquisition import (
+    TargetGate,
+    TenantAdmission,
+    TenantBudgetExceeded,
+    TenantGate,
+    TenantQuotaExceeded,
+    TenantRpmExceeded,
+)
 from app.routing.router import (
     AllTargetsFailed,
     Attempt,
     DeadlineExceeded,
     NoEnabledTarget,
+    Outcome,
     RequestTooLarge,
     RoutedResponse,
     Router,
@@ -148,13 +156,16 @@ async def chat_completions(
     request_id = uuid4().hex
     received_at = dt.datetime.now(dt.UTC)
     try:
-        admission = await tenant_gate.acquire(owner.tenant_id, owner.limits)
+        admission = await tenant_gate.acquire(
+            owner.tenant_id, owner.limits, request.model_dump(exclude_unset=True)
+        )
     except TenantQuotaExceeded as exc:
         refused = _tenant_quota_response(exc)
         refused.headers["X-Gateway-Request-Id"] = request_id
         return refused
     attempts: list[Attempt] = []
     result = await _route(gateway_router, request, attempts, redis_down=admission.degraded)
+    await _record_tenant_outcome(tenant_gate, admission, result, attempts)
     background_tasks.add_task(
         usage_log.write,
         request_id=request_id,
@@ -175,15 +186,42 @@ async def chat_completions(
 
 def _tenant_quota_response(exc: TenantQuotaExceeded) -> JSONResponse:
     """Build the 429 of a tenant over its own quota, distinct from the 503 of busy providers."""
-    response = error_response(
-        429,
-        f"You exceeded your requests-per-minute limit for this gateway ({exc.rpm} requests "
-        "per minute). This is your own tenant quota, not a provider limit.",
-        "rate_limit_error",
-        code="tenant_quota_exceeded",
-    )
+    match exc:
+        case TenantRpmExceeded():
+            message = (
+                f"You exceeded your requests-per-minute limit for this gateway ({exc.rpm} "
+                "requests per minute). This is your own tenant quota, not a provider limit."
+            )
+        case TenantBudgetExceeded():
+            message = (
+                f"This request would exceed your daily token budget for this gateway "
+                f"({exc.budget} tokens per day, {exc.remaining} left, about {exc.needed} "
+                "needed). This is your own tenant quota, not a provider limit. Lower "
+                "max_tokens, or wait until the budget resets at midnight UTC."
+            )
+        case _:
+            message = f"You exceeded your quota for this gateway: {exc}."
+    response = error_response(429, message, "rate_limit_error", code="tenant_quota_exceeded")
     response.headers["Retry-After"] = _retry_after_header(exc.retry_after)
     return response
+
+
+async def _record_tenant_outcome(
+    tenant_gate: TenantGate,
+    admission: TenantAdmission,
+    result: RoutedResponse | JSONResponse,
+    attempts: list[Attempt],
+) -> None:
+    """Settle the tokens reserved in the tenant's daily budget, now that the request is over.
+
+    Success: the real usage replaces the estimate. Failure: the tokens are given
+    back, unless the last attempt timed out, as the provider may have used them.
+    """
+    if isinstance(result, RoutedResponse):
+        await tenant_gate.record_success(admission, result.used_tokens)
+        return
+    timed_out = bool(attempts) and attempts[-1].outcome == Outcome.TIMEOUT
+    await tenant_gate.record_failure(admission, keep_tokens=timed_out)
 
 
 def _retry_after_header(seconds: float) -> str:

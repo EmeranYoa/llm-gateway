@@ -1,7 +1,9 @@
 """Shared quota state in Redis: may a request go through, and can a target be called now.
 
 Before routing, the API calls `TenantGate.acquire` once per request: one Lua
-script checks and counts the tenant's own quota.
+script checks the tenant's own quotas, counts the request and reserves its
+token estimate in the tenant's daily budget. Once the request is over, the API
+corrects or releases that reservation with `TenantGate.record_*`.
 
 Before calling a target, the router calls `TargetGate.acquire`. One Lua script
 checks, atomically, everything that can block the target: cooldown, circuit
@@ -14,21 +16,26 @@ is unavailable, both gates let requests through without checks (ADR 0002).
 
 import datetime as dt
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from app.config import BreakerSection, CooldownSection, Target, TenantLimits
-from app.routing.quotas import quota_day
+from app.config import BreakerSection, CooldownSection, DailyReset, Target, TenantLimits
+from app.routing.quotas import estimate_call_tokens, estimate_prompt_tokens, quota_day
 
 logger = logging.getLogger(__name__)
 
 _LUA_DIR = Path(__file__).parent / "lua"
 
 _QUOTA_REASONS = ("rpm", "tpm", "rpd")
+
+# The daily token budget of every tenant resets at 00:00 UTC.
+_UTC_MIDNIGHT = DailyReset(time=dt.time(0, 0), timezone="UTC")
 
 
 @dataclass(frozen=True)
@@ -267,19 +274,45 @@ class TargetGate:
 
 
 class TenantQuotaExceeded(Exception):
-    """The tenant has used up its own quota. No provider is called."""
+    """The tenant has used up one of its own quotas. No provider is called."""
+
+    def __init__(self, message: str, retry_after: float) -> None:
+        super().__init__(f"{message} ({retry_after:.1f} s left)")
+        self.retry_after = retry_after
+        """Seconds until the tenant may send this request again."""
+
+
+class TenantRpmExceeded(TenantQuotaExceeded):
+    """The tenant has sent its requests-per-minute limit within the last 60 s."""
 
     def __init__(self, rpm: int, retry_after: float) -> None:
-        super().__init__(f"tenant RPM limit of {rpm} reached ({retry_after:.1f} s left)")
+        super().__init__(f"tenant RPM limit of {rpm} reached", retry_after)
         self.rpm = rpm
-        self.retry_after = retry_after
-        """Seconds until the tenant may send a request again."""
+
+
+class TenantBudgetExceeded(TenantQuotaExceeded):
+    """The token estimate of the request is larger than what is left of the daily budget."""
+
+    def __init__(self, budget: int, remaining: int, needed: int, retry_after: float) -> None:
+        super().__init__(
+            f"tenant daily token budget of {budget} too low: {needed} tokens needed, "
+            f"{remaining} left",
+            retry_after,
+        )
+        self.budget = budget
+        self.remaining = remaining
+        """Tokens left in today's budget."""
+        self.needed = needed
+        """Token estimate of the refused request."""
 
 
 @dataclass(frozen=True)
 class TenantAdmission:
-    """A request the tenant quotas let through."""
+    """A request the tenant quotas let through, and the tokens reserved for it."""
 
+    budget_key: str | None = None
+    """Daily budget counter holding the reservation, or None when nothing was reserved."""
+    reserved_tokens: int = 0
     degraded: bool = False
     """True when Redis was unavailable: the quotas were not checked (ADR 0002)."""
 
@@ -287,22 +320,45 @@ class TenantAdmission:
 class TenantGate:
     """Tenant quotas, checked once per request before routing."""
 
-    def __init__(self, redis: Redis, default_limits: TenantLimits) -> None:
+    def __init__(
+        self, redis: Redis, default_limits: TenantLimits, default_completion_tokens: int
+    ) -> None:
         self._default_limits = default_limits
+        self._default_completion_tokens = default_completion_tokens
         self._acquire_script = redis.register_script(_lua("acquire_tenant.lua"))
+        self._record_script = redis.register_script(_lua("record_tenant_outcome.lua"))
 
-    async def acquire(self, tenant_id: int, own_limits: TenantLimits) -> TenantAdmission:
-        """Count one request of the tenant, or raise `TenantQuotaExceeded`.
+    async def acquire(
+        self, tenant_id: int, own_limits: TenantLimits, body: Mapping[str, Any]
+    ) -> TenantAdmission:
+        """Count one request of the tenant and reserve its tokens, or raise `TenantQuotaExceeded`.
 
         `own_limits` are the tenant's own limits; a missing one falls back to
-        the default limits of the config. The request stays counted even if
-        routing then fails. When Redis is unavailable, the request is let
-        through without any check (fail open, ADR 0002).
+        the default limits of the config. The request stays counted in the RPM
+        even if routing then fails. The token estimate of `body` (prompt plus
+        `max_tokens` or the default completion size) is reserved in the daily
+        budget until `record_success` or `record_failure`. When Redis is
+        unavailable, the request is let through without any check (fail open,
+        ADR 0002).
         """
-        rpm = own_limits.rpm if own_limits.rpm is not None else self._default_limits.rpm
+        rpm = _own_or_default(own_limits.rpm, self._default_limits.rpm)
+        budget = _own_or_default(own_limits.tokens_per_day, self._default_limits.tokens_per_day)
+        # Not capped by a target TPM: the budget counts what the request may really use.
+        tokens = estimate_call_tokens(
+            estimate_prompt_tokens(body), body, self._default_completion_tokens, tpm=None
+        )
+        day, next_midnight = quota_day(_UTC_MIDNIGHT, dt.datetime.now(dt.UTC))
+        budget_key = f"tenant_tokens:{tenant_id}:{day.isoformat()}"
         try:
             result = await self._acquire_script(
-                keys=[f"tenant_rpm:{tenant_id}"], args=[uuid4().hex, rpm or 0]
+                keys=[f"tenant_rpm:{tenant_id}", budget_key],
+                args=[
+                    uuid4().hex,
+                    rpm or 0,
+                    tokens,
+                    budget or 0,
+                    round(next_midnight.timestamp() * 1000),
+                ],
             )
         except RedisError as error:
             logger.warning(
@@ -310,9 +366,51 @@ class TenantGate:
             )
             return TenantAdmission(degraded=True)
         if result[0] == b"ok":
-            return TenantAdmission()
-        assert rpm is not None, "the script only refuses a request when a limit is set"
-        raise TenantQuotaExceeded(rpm, retry_after=int(result[1]) / 1000)
+            if budget is None:
+                return TenantAdmission()
+            return TenantAdmission(budget_key=budget_key, reserved_tokens=tokens)
+        retry_after = int(result[1]) / 1000
+        if result[0] == b"rpm":
+            assert rpm is not None, "the script only refuses a request when a limit is set"
+            raise TenantRpmExceeded(rpm, retry_after)
+        assert budget is not None, "the script only refuses a request when a limit is set"
+        raise TenantBudgetExceeded(budget, int(result[2]), tokens, retry_after)
+
+    async def record_success(self, admission: TenantAdmission, used_tokens: int | None) -> None:
+        """Replace the reserved token estimate with the real usage of the request.
+
+        When the provider did not report its usage, the estimate stays reserved.
+        """
+        if used_tokens is not None:
+            await self._record(admission, "correct", used_tokens)
+
+    async def record_failure(self, admission: TenantAdmission, *, keep_tokens: bool) -> None:
+        """Give the reserved tokens back after a request that failed as a whole.
+
+        With `keep_tokens` they stay reserved: after a timeout, the provider may
+        have generated them anyway.
+        """
+        if not keep_tokens:
+            await self._record(admission, "release", 0)
+
+    async def _record(self, admission: TenantAdmission, action: str, used_tokens: int) -> None:
+        """Run `record_tenant_outcome.lua`, when tokens were reserved for the request."""
+        if admission.budget_key is None:
+            return
+        try:
+            await self._record_script(
+                keys=[admission.budget_key],
+                args=[admission.reserved_tokens, action, used_tokens],
+            )
+        except RedisError as error:
+            logger.warning(
+                "Redis is unavailable (%s): the token budget of a tenant was not updated",
+                type(error).__name__,
+            )
+
+
+def _own_or_default(own: int | None, default: int | None) -> int | None:
+    return own if own is not None else default
 
 
 def _key(kind: str, target: Target) -> str:

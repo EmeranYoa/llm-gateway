@@ -212,6 +212,8 @@ class RoutedResponse:
     target: Target
     fallbacks: int
     """Number of targets examined before the one that answered."""
+    used_tokens: int | None = None
+    """Tokens the target reported using (prompt and completion), or None if it did not say."""
 
 
 class Router:
@@ -333,7 +335,10 @@ class Router:
             await self._gate.record_success(target, acquired, response.total_tokens)
             attempts.append(Attempt.succeeded(target, response, _elapsed_ms(started), acquired))
             return RoutedResponse(
-                body={**response.body, "model": target.model}, target=target, fallbacks=index
+                body={**response.body, "model": target.model},
+                target=target,
+                fallbacks=index,
+                used_tokens=response.total_tokens,
             )
         if all(isinstance(error, ContextTooLarge) for _, error in failures):
             raise RequestTooLarge(alias)
