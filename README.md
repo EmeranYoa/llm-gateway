@@ -18,6 +18,7 @@ Free LLM tiers are generous but fragile. Each provider has its own small limits 
 - **Aliases.** The client asks for `chat-fast`; the gateway maps it to an ordered list of real `provider/model` targets.
 - **Quotas.** It tracks RPM, TPM and RPD per target in Redis, and never sends a call that would exceed them.
 - **Automatic failover.** On a `429`, a `5xx`, a timeout or a bad API key, it moves on to the next target. On a real client error (`400`), it answers at once instead of wasting quota on every provider.
+- **Streaming.** `stream: true` returns Server-Sent Events in OpenAI format. The gateway still fails over until the first token, then relays the stream as it comes.
 - **Cooldown and circuit breaker.** Rate-limited targets are skipped for the delay the provider asks for; unstable targets are skipped by a circuit breaker.
 - **Shared state.** Quotas, cooldowns and breakers live in Redis, so several gateway instances share them.
 - **Degraded mode.** If Redis goes down, the gateway keeps routing (without quota checks) instead of failing.
@@ -71,6 +72,7 @@ flowchart TD
 | `app/auth/` | API key generation, hashing and verification (with its cache) |
 | `app/admin.py` | Admin command line: create, list and revoke keys, set tenant limits |
 | `app/routing/router.py` | Failover loop, deadline, outcome of each attempt |
+| `app/routing/streaming.py` | A stream after its first content: idle timeout, maximum duration, token usage |
 | `app/routing/acquisition.py` + `app/routing/lua/` | Atomic Redis scripts: tenant quotas, cooldown, circuit breaker, provider quota reservation |
 | `app/routing/quotas.py` | Token estimate, provider daily reset time |
 | `app/providers/` | Provider interface and the generic OpenAI-compatible adapter |
@@ -129,12 +131,46 @@ Errors always use the OpenAI format (`{"error": {"message", "type", "param", "co
 
 | Status | When |
 |---|---|
-| `400` | Invalid request, `stream: true` (not supported yet), or a request too large for every target (`context_length_exceeded`). Provider client errors keep their status (`400`, `422`, ...) and are not retried elsewhere. |
+| `400` | Invalid request, or a request too large for every target (`context_length_exceeded`). Provider client errors keep their status (`400`, `422`, ...) and are not retried elsewhere. |
 | `401` | Missing, unknown or revoked gateway API key (`invalid_api_key`). |
 | `404` | Unknown alias (`model_not_found`). |
 | `429` | Your tenant is over its own quota (`tenant_quota_exceeded`): requests per minute, or daily token budget. `Retry-After` says when to retry. This is your quota, not a provider limit. |
 | `503` | Every target is blocked or failed (`all_targets_failed`). `Retry-After` gives the smallest known wait. Also returned when no provider of the alias has an API key (`no_enabled_target`), or when your key cannot be checked because the database is down (`authentication_unavailable`). |
 | `504` | The request deadline ran out (`deadline_exceeded`). |
+
+## Streaming
+
+Set `stream=True` as with the OpenAI API. Chunks arrive as the model writes them:
+
+```python
+stream = client.chat.completions.create(
+    model="chat-fast",
+    messages=[{"role": "user", "content": "Tell me a short story."}],
+    stream=True,
+)
+for chunk in stream:
+    if chunk.choices and chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
+```
+
+Or with `curl` (`-N` prints each event as soon as it arrives):
+
+```bash
+curl -N http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer gw_..." -H "Content-Type: application/json" \
+  -d '{"model": "chat-fast", "stream": true, "messages": [{"role": "user", "content": "Hi"}]}'
+```
+
+The stream follows one rule, the **commit point**: the first chunk with output for the client (text, reasoning or a tool call).
+
+- **Before the commit point**, nothing is sent to the client, not even the status or the headers. Every error fails over as for a normal request: a `429`, a `5xx`, a timeout, or an error event sent by the provider just after its `200`. The client never sees the failed attempts.
+- **At the commit point**, the client receives `200`, the `X-Gateway-*` headers and the first chunks. The target is fixed: there is no more failover.
+- **After the commit point**, if the provider fails, goes silent for longer than `gateway.stream.idle_timeout`, or the stream lasts longer than `gateway.stream.max_duration`, the gateway sends an error event with the code `stream_interrupted` and closes the stream **without** `data: [DONE]`. The OpenAI SDK raises `APIError`, so a cut answer is never taken for a complete one.
+- **If the client disconnects**, the gateway closes the provider call at once and stops failing over: a client that left costs nothing more.
+
+Each chunk is relayed unchanged, except `model`, set to the real model like in normal responses. The request deadline only bounds the time to the first content: a long answer is not cut by it.
+
+To keep quotas accurate, the gateway asks the provider for the token usage of the stream (`stream_options.include_usage`) even when the client did not, and then removes it from the stream: the client gets exactly what it asked for. Provider extensions pass through unchanged (Groq always sends its own `x_groq.usage`). If a provider reports no usage, the completion is estimated from the streamed characters.
 
 ## Authentication and tenants
 
@@ -188,6 +224,9 @@ gateway:                      # all optional, defaults shown
     failures: 5               # 5xx / network errors / timeouts within the window that open it
     window: 60                # seconds
     open: 30                  # seconds before a single trial call is let through
+  stream:                     # streamed answers, after their first content
+    idle_timeout: 30          # longest silence allowed between two events of the provider
+    max_duration: 600         # longest time a stream may last (the deadline no longer applies)
 
 tenants:                      # optional; a missing limit means "no limit"
   default_limits:
@@ -213,6 +252,21 @@ routes:
 | `timeout` | `30` | Seconds for one attempt (also bounded by the request deadline). |
 
 See [`config/gateway.yaml`](config/gateway.yaml) for the full example.
+
+### Usage log
+
+The `usage_log` table has one row per examined target, grouped by `request_id`: tenant, API key, alias, provider, model, outcome, status, latency, token estimate and real usage. Streamed requests have `stream = true` and `first_token_ms`, the time to the first content; `latency_ms` is the whole duration of the attempt.
+
+| Outcome | Meaning |
+|---|---|
+| `success` | The target answered. |
+| `rate_limited`, `unavailable`, `timeout`, `misconfigured` | The call failed (`429`; `5xx` or network error; timeout; `401`/`403`/`404`). The gateway failed over. |
+| `invalid_request` | The provider refused the client request. Returned to the client, no failover. |
+| `context_too_large` | The request is too large for this target (skipped before the call, or refused by the provider). |
+| `skipped_cooldown`, `skipped_breaker`, `skipped_quota` | Not called: cooldown, open circuit breaker, or full RPM/TPM/RPD quota. |
+| `rejected_tenant_quota` | The tenant was over its own quota. No target is examined (`provider` and `model` are empty). |
+| `interrupted` | A stream broke after its first content (provider error, idle timeout or maximum duration). |
+| `cancelled` | The client disconnected before the end of the answer. |
 
 ### Free-tier providers
 
@@ -247,6 +301,12 @@ Checked on the providers' documentation on 2026-10-21. Free tiers change often (
 
 **Token accounting.** Before a call, the gateway reserves an estimate (`characters / 4`, plus `max_tokens` or `default_completion_tokens`, capped at the target TPM). After the call it replaces the estimate with the real usage, releases it on failure, and keeps it on timeout (the provider may have generated tokens anyway). The request itself always stays counted.
 
+**Fail over until the first token, never after.** Before the commit point the client has received nothing, so switching targets is invisible to it. After it, switching would mix two answers in one stream, so the gateway reports the failure instead (`stream_interrupted`, no `[DONE]`). Reasoning counts as output: reasoning models think before they answer, and holding their reasoning back would leave the client waiting.
+
+**A stream is recorded in two steps.** The commit point counts as a success for the circuit breaker (the provider answered), so a half-open trial ends there instead of lasting the whole stream. The end of the stream corrects the tokens; an interrupted stream also counts as a breaker failure. A disconnected client is neutral: it is not the provider's fault. Interrupted and cancelled streams keep their reserved tokens, as the provider may have generated them.
+
+**The only change to the client request: stream usage.** The gateway never changes the request, with one exception: for streams it adds `stream_options.include_usage` and removes the usage chunk from what the client receives. Without it, most streams would report no usage, and every stream would keep its whole `max_tokens` reservation: budgets would run out far too early.
+
 **Never store prompts.** The usage log stores the prompt length only. Upstream error messages of client errors are not stored either, because some providers quote the invalid input in them.
 
 ## Development
@@ -266,11 +326,12 @@ uv run ruff check . && uv run ruff format --check .
 uv run mypy
 ```
 
-Tests go through the HTTP API: upstream providers are mocked with [respx](https://lundberg.github.io/respx/), Redis and PostgreSQL are real. They cover failover on `429`, `5xx` and timeouts, no failover on `400`, cooldowns, circuit breaker transitions (including the half-open trial under concurrency), concurrent quota reservation, `Retry-After`, the deadline, degraded mode, API keys (revocation, cache, database outages), tenant quotas under concurrency, the admin command line run as a real process, and the official OpenAI SDK. CI runs the same checks on every push.
+Tests go through the HTTP API: upstream providers are mocked with [respx](https://lundberg.github.io/respx/), Redis and PostgreSQL are real. They cover failover on `429`, `5xx` and timeouts, no failover on `400`, cooldowns, circuit breaker transitions (including the half-open trial under concurrency), concurrent quota reservation, `Retry-After`, streaming (failover before the first token, interruptions, stream timeouts, client disconnects, token usage), the deadline, degraded mode, API keys (revocation, cache, database outages), tenant quotas under concurrency, the admin command line run as a real process, and the official OpenAI SDK. CI runs the same checks on every push.
 
 ## Limitations
 
-- **No streaming yet.** `stream: true` is refused with a clear `400`.
+- **No failover once a stream has started.** After the first token, a provider failure ends the stream with a `stream_interrupted` error event; the client must retry.
+- **A provider must accept `stream_options`.** The gateway adds it to every streamed request. The providers of the example config accept it; check a new provider before adding it.
 - **A revoked key keeps working up to 60 s** on each gateway instance, until its cache entry expires (`AUTH_CACHE_TTL`). The cache is per instance.
 - **A hanging PostgreSQL slows down authentication.** If the database accepts connections but never answers, each request whose key cache entry has expired waits `DATABASE_TIMEOUT` (5 s) before the grace period lets it through.
 - **The tenant token budget is checked against an estimate.** A request whose `max_tokens` does not fit the remaining budget is refused, even if the real answer would have been short. The error message suggests lowering `max_tokens`.
