@@ -12,33 +12,38 @@ Free LLM tiers are generous but fragile. Each provider has its own small limits 
 
 ## What the gateway does
 
-- **One OpenAI-compatible endpoint.** The official OpenAI SDK works by changing only `base_url`.
+- **One OpenAI-compatible endpoint.** The official OpenAI SDK works by changing only `base_url` and `api_key`.
+- **API keys and tenants.** Each client application (tenant) gets its own `gw_` API key, created and revoked with an admin command. Authentication is always on.
+- **Tenant quotas.** Each tenant has its own requests per minute and daily token budget, so one greedy client cannot use up the free tiers of everyone else.
 - **Aliases.** The client asks for `chat-fast`; the gateway maps it to an ordered list of real `provider/model` targets.
 - **Quotas.** It tracks RPM, TPM and RPD per target in Redis, and never sends a call that would exceed them.
 - **Automatic failover.** On a `429`, a `5xx`, a timeout or a bad API key, it moves on to the next target. On a real client error (`400`), it answers at once instead of wasting quota on every provider.
 - **Cooldown and circuit breaker.** Rate-limited targets are skipped for the delay the provider asks for; unstable targets are skipped by a circuit breaker.
 - **Shared state.** Quotas, cooldowns and breakers live in Redis, so several gateway instances share them.
 - **Degraded mode.** If Redis goes down, the gateway keeps routing (without quota checks) instead of failing.
-- **Usage log.** Every examined target is logged in PostgreSQL: outcome, latency, tokens, fallbacks. Prompts are never stored.
+- **Usage log.** Every examined target is logged in PostgreSQL with its tenant and API key: outcome, latency, tokens, fallbacks. Prompts are never stored.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    app["Your application<br/>(OpenAI SDK)"] -->|"POST /v1/chat/completions<br/>model: chat-fast"| api
+    app["Your application<br/>(OpenAI SDK)"] -->|"POST /v1/chat/completions<br/>Bearer gw_... key<br/>model: chat-fast"| auth
 
     subgraph gateway["LLM Gateway (FastAPI)"]
-        api["API<br/>validation, OpenAI errors"] --> router["Router<br/>failover loop, deadline"]
+        auth["Authenticator<br/>API key, cached 60 s"] --> tenant["TenantGate<br/>tenant RPM and<br/>daily token budget"]
+        tenant --> router["Router<br/>failover loop, deadline"]
         router --> gate["TargetGate<br/>Lua scripts"]
         router --> adapter["OpenAI-compatible<br/>provider adapter"]
     end
 
+    auth <-->|"tenants, api_keys"| pg
+    tenant <-->|"acquire_tenant<br/>(atomic)"| redis
     gate <-->|"acquire_target / record_outcome<br/>(atomic)"| redis[("Redis<br/>quotas, cooldowns,<br/>circuit breakers")]
     adapter --> groq["Groq"]
     adapter --> gemini["Gemini"]
     adapter --> openrouter["OpenRouter"]
     adapter --> ollama["Ollama (local)"]
-    api -->|"after the response"| pg[("PostgreSQL<br/>usage_log")]
+    router -->|"after the response"| pg[("PostgreSQL<br/>tenants, api_keys,<br/>usage_log")]
 ```
 
 For each request, the router walks the targets of the alias in order:
@@ -63,11 +68,13 @@ flowchart TD
 | Module | Role |
 |---|---|
 | `app/api/routes.py` | HTTP endpoints, OpenAI error format, response headers |
+| `app/auth/` | API key generation, hashing and verification (with its cache) |
+| `app/admin.py` | Admin command line: create, list and revoke keys, set tenant limits |
 | `app/routing/router.py` | Failover loop, deadline, outcome of each attempt |
-| `app/routing/acquisition.py` + `app/routing/lua/` | Atomic Redis scripts: cooldown, circuit breaker, quota reservation |
+| `app/routing/acquisition.py` + `app/routing/lua/` | Atomic Redis scripts: tenant quotas, cooldown, circuit breaker, provider quota reservation |
 | `app/routing/quotas.py` | Token estimate, provider daily reset time |
 | `app/providers/` | Provider interface and the generic OpenAI-compatible adapter |
-| `app/storage/usage.py` | Usage log (SQLAlchemy async, Alembic migrations in `migrations/`) |
+| `app/storage/` | Tenants, API keys and usage log (SQLAlchemy async, Alembic migrations in `migrations/`) |
 | `app/config.py` | Environment settings and `config/gateway.yaml` validation |
 
 ## Quickstart
@@ -83,6 +90,9 @@ cp .env.example .env
 
 docker compose up -d --build
 curl http://localhost:8000/health
+
+# Create an API key for your application (shown only once: store it now).
+docker compose exec gateway python -m app.admin create-key --tenant demo
 ```
 
 No API key at all? Run the optional local model instead (about 2 GB to download):
@@ -92,12 +102,12 @@ docker compose --profile ollama up -d --build
 docker compose exec ollama ollama pull llama3.2:3b
 ```
 
-Then call the gateway with the official OpenAI SDK, changing only `base_url`:
+Then call the gateway with the official OpenAI SDK, changing only `base_url` and `api_key`:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-used-by-the-gateway")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="gw_...")  # your gateway key
 response = client.chat.completions.with_raw_response.create(
     model="chat-fast",
     messages=[{"role": "user", "content": "Say hello in French."}],
@@ -120,9 +130,30 @@ Errors always use the OpenAI format (`{"error": {"message", "type", "param", "co
 | Status | When |
 |---|---|
 | `400` | Invalid request, `stream: true` (not supported yet), or a request too large for every target (`context_length_exceeded`). Provider client errors keep their status (`400`, `422`, ...) and are not retried elsewhere. |
+| `401` | Missing, unknown or revoked gateway API key (`invalid_api_key`). |
 | `404` | Unknown alias (`model_not_found`). |
-| `503` | Every target is blocked or failed (`all_targets_failed`). `Retry-After` gives the smallest known wait. Also returned when no provider of the alias has an API key (`no_enabled_target`). |
+| `429` | Your tenant is over its own quota (`tenant_quota_exceeded`): requests per minute, or daily token budget. `Retry-After` says when to retry. This is your quota, not a provider limit. |
+| `503` | Every target is blocked or failed (`all_targets_failed`). `Retry-After` gives the smallest known wait. Also returned when no provider of the alias has an API key (`no_enabled_target`), or when your key cannot be checked because the database is down (`authentication_unavailable`). |
 | `504` | The request deadline ran out (`deadline_exceeded`). |
+
+## Authentication and tenants
+
+Every request to `/v1/chat/completions` needs a gateway API key, sent as `Authorization: Bearer <key>` (the `api_key` of the OpenAI SDK). There is no setting to turn authentication off. `/health` stays public and only reports the gateway and Redis status.
+
+A **tenant** is one client of the gateway: an application or a customer. Manage tenants and keys with the admin command, inside the container:
+
+```bash
+docker compose exec gateway python -m app.admin create-key --tenant acme --rpm 30 --tokens-per-day 200000
+docker compose exec gateway python -m app.admin list-keys --tenant acme
+docker compose exec gateway python -m app.admin revoke-key 12
+docker compose exec gateway python -m app.admin set-limits --tenant acme --tokens-per-day 500000
+```
+
+- Keys look like `gw_` + 32 random bytes. `create-key` prints a key once; only its SHA-256 hash is stored. `list-keys` shows a short prefix (`gw_Ta-3Yw`), never a full key.
+- A tenant can have several keys at the same time, to rotate a key without downtime: create the new key, switch the client, revoke the old key.
+- Each tenant has a **requests-per-minute** limit and a **daily token budget** (reset at 00:00 UTC). Defaults come from `tenants.default_limits` in `gateway.yaml`; `create-key` and `set-limits` override them per tenant.
+- Tenant quotas are checked once per request, before routing, on top of the provider quotas. The token budget works like the provider TPM: the estimate is reserved before the call, then replaced by the real usage on success, given back when the whole request fails, and kept on timeout.
+- Verified keys are cached in memory for 60 s (`AUTH_CACHE_TTL`): most requests need no database query. A revoked key or new limits take effect within that time.
 
 ## Configuration reference
 
@@ -142,7 +173,7 @@ Errors always use the OpenAI format (`{"error": {"message", "type", "param", "co
 
 ### `config/gateway.yaml`
 
-The file has three sections. Limits belong to the **model**, routes only reference `provider/model`. An invalid file, or a route to an undeclared model, stops the gateway at startup with a clear message.
+The file has four sections. Limits belong to the **model**, routes only reference `provider/model`. An invalid file, or a route to an undeclared model, stops the gateway at startup with a clear message.
 
 ```yaml
 gateway:                      # all optional, defaults shown
@@ -157,6 +188,11 @@ gateway:                      # all optional, defaults shown
     failures: 5               # 5xx / network errors / timeouts within the window that open it
     window: 60                # seconds
     open: 30                  # seconds before a single trial call is let through
+
+tenants:                      # optional; a missing limit means "no limit"
+  default_limits:
+    rpm: 60                   # requests per minute of each tenant
+    tokens_per_day: 500000    # daily token budget of each tenant, reset at 00:00 UTC
 
 providers:
   groq:
@@ -195,6 +231,10 @@ Checked on the providers' documentation on 2026-10-21. Free tiers change often (
 
 **Fail open when Redis is down.** Exceeding a free-tier quota costs no money: the provider answers `429` and the gateway fails over. A Redis outage that stopped the gateway would cost far more. So without Redis the gateway routes without quota checks, logs a warning, marks usage rows `degraded` and reports `degraded` on `/health`. This must be revisited before using paid providers.
 
+**Fail closed for authentication, fail open for quotas.** When PostgreSQL is down, a key verified in the last 15 minutes (`AUTH_GRACE_PERIOD`) keeps working, and any other key is refused with `503`: an unchecked key is never accepted. Quotas do the opposite and let requests through when Redis is down. The asymmetry follows the cost of a mistake: a missed quota check costs a `429` from a free tier, a missed authentication check lets anyone spend the provider keys.
+
+**Two barriers: the tenant, then the providers.** A tenant over its own quota gets `429 tenant_quota_exceeded`; a request that no provider can serve gets `503`. The two errors are distinct, so a client knows whether the limit is its own or the platform's.
+
 **Limits belong to the model, not to the route.** Providers count usage per model. Declaring limits on routes would allow two aliases to give different limits to the same model, for one shared counter.
 
 **Errors are translated into five types.** The adapter maps every upstream error to `RateLimited`, `ProviderUnavailable`, `TargetMisconfigured`, `ContextTooLarge` or `InvalidRequest`. The router decides failover, cooldown and breaker from these types only, so it never depends on one provider's details.
@@ -226,14 +266,17 @@ uv run ruff check . && uv run ruff format --check .
 uv run mypy
 ```
 
-Tests go through the HTTP API: upstream providers are mocked with [respx](https://lundberg.github.io/respx/), Redis and PostgreSQL are real. They cover failover on `429`, `5xx` and timeouts, no failover on `400`, cooldowns, circuit breaker transitions (including the half-open trial under concurrency), concurrent quota reservation, `Retry-After`, the deadline, degraded mode, and the official OpenAI SDK. CI runs the same checks on every push.
+Tests go through the HTTP API: upstream providers are mocked with [respx](https://lundberg.github.io/respx/), Redis and PostgreSQL are real. They cover failover on `429`, `5xx` and timeouts, no failover on `400`, cooldowns, circuit breaker transitions (including the half-open trial under concurrency), concurrent quota reservation, `Retry-After`, the deadline, degraded mode, API keys (revocation, cache, database outages), tenant quotas under concurrency, the admin command line run as a real process, and the official OpenAI SDK. CI runs the same checks on every push.
 
 ## Limitations
 
 - **No streaming yet.** `stream: true` is refused with a clear `400`.
-- **No client authentication.** Anyone who can reach the gateway can use its provider keys. Keep it on a private network.
+- **A revoked key keeps working up to 60 s** on each gateway instance, until its cache entry expires (`AUTH_CACHE_TTL`). The cache is per instance.
+- **A hanging PostgreSQL slows down authentication.** If the database accepts connections but never answers, each request whose key cache entry has expired waits `DATABASE_TIMEOUT` (5 s) before the grace period lets it through.
+- **The tenant token budget is checked against an estimate.** A request whose `max_tokens` does not fit the remaining budget is refused, even if the real answer would have been short. The error message suggests lowering `max_tokens`.
 - **Token estimates are approximate** (`characters / 4`). They are corrected with the real usage after each call.
 - **The gateway only knows its own traffic.** If the same API key is also used elsewhere, the provider may answer `429` earlier than expected; the cooldown then takes over.
 - **A field accepted by one provider but refused by another** gives a `400` without failover, because the gateway cannot tell it from a real client error.
 - **Usage rows can be lost** if the process crashes right after sending a response: they are written in the background.
+- **Ollama silently cuts long prompts.** On CPU its context window is 4,096 tokens by default; a longer prompt is truncated without an error. Raise `num_ctx` on the Ollama side for long prompts.
 - **Free-tier limits change often.** The values in `config/gateway.yaml` were checked on the date given in the file; check them again before relying on them.
