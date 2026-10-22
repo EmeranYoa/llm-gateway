@@ -115,3 +115,60 @@ async def test_normal_routing_comes_back_when_redis_answers_again(
     assert during.status_code == after.status_code == 200
     assert [row["degraded"] for row in await usage_rows()] == [True, False]
     assert health.json()["status"] == "ok"
+
+
+# Tight tenant quotas: one request per minute and a daily budget of 10 tokens,
+# so every request after the first one would be refused while Redis works.
+TIGHT_TENANT_QUOTAS = "tenants: {default_limits: {rpm: 1, tokens_per_day: 10}}\n"
+
+
+async def test_tight_tenant_quotas_refuse_requests_when_redis_is_up(
+    write_config: WriteConfig, respx_mock: respx.MockRouter, redis_url: str
+) -> None:
+    respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
+    settings = write_config(TIGHT_TENANT_QUOTAS + FAILOVER_CONFIG).model_copy(
+        update={"redis_url": redis_url}
+    )
+
+    async with gateway_client(settings) as client:
+        response = await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+
+    # The control case of the test below: these quotas do refuse requests.
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "tenant_quota_exceeded"
+
+
+async def test_tenant_quotas_are_skipped_when_redis_is_down(
+    write_config: WriteConfig, respx_mock: respx.MockRouter, usage_rows: FetchUsageRows
+) -> None:
+    respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
+    settings = write_config(TIGHT_TENANT_QUOTAS + FAILOVER_CONFIG).model_copy(
+        update={"redis_url": UNREACHABLE_REDIS}
+    )
+
+    async with gateway_client(settings) as client:
+        responses = [await client.post("/v1/chat/completions", json=CHAT_REQUEST) for _ in range(3)]
+
+    # Fail open (ADR 0002): without Redis, the tenant quotas cannot be checked.
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    rows = await usage_rows()
+    assert [(row["outcome"], row["degraded"]) for row in rows] == [("success", True)] * 3
+
+
+@pytest.mark.parametrize(
+    "authorization", [None, "Bearer gw_not-a-real-key"], ids=["missing", "unknown"]
+)
+async def test_authentication_is_still_enforced_when_redis_is_down(
+    write_config: WriteConfig, respx_mock: respx.MockRouter, authorization: str | None
+) -> None:
+    groq = respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
+    headers = {} if authorization is None else {"Authorization": authorization}
+
+    async with gateway_client(
+        settings_with_redis(write_config, UNREACHABLE_REDIS), api_key=None
+    ) as client:
+        response = await client.post("/v1/chat/completions", json=CHAT_REQUEST, headers=headers)
+
+    # Fail closed (ADR 0004): a Redis outage never opens the gateway to unknown keys.
+    assert response.status_code == 401
+    assert not groq.called
