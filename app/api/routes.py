@@ -152,6 +152,7 @@ async def chat_completions(
     The tenant quotas are checked first: a tenant over its quota gets a 429 and
     no provider is called. Every examined target is written to the usage log
     after the response is sent, whether the request succeeds or ends in an error.
+    A request refused by its tenant quota is logged as one row without a target.
     """
     request_id = uuid4().hex
     received_at = dt.datetime.now(dt.UTC)
@@ -160,6 +161,15 @@ async def chat_completions(
             owner.tenant_id, owner.limits, request.model_dump(exclude_unset=True)
         )
     except TenantQuotaExceeded as exc:
+        background_tasks.add_task(
+            usage_log.write_tenant_rejection,
+            request_id=request_id,
+            received_at=received_at,
+            owner=owner,
+            alias=request.model,
+            prompt_chars=request.prompt_chars(),
+            reason=str(exc),
+        )
         refused = _tenant_quota_response(exc)
         refused.headers["X-Gateway-Request-Id"] = request_id
         return refused
@@ -170,6 +180,7 @@ async def chat_completions(
         usage_log.write,
         request_id=request_id,
         received_at=received_at,
+        owner=owner,
         alias=request.model,
         prompt_chars=request.prompt_chars(),
         attempts=attempts,

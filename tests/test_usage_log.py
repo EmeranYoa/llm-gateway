@@ -5,6 +5,7 @@ import datetime as dt
 import logging
 from collections.abc import Callable
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -14,10 +15,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings
+from app.storage.tenants import NewApiKey, create_api_key
 from tests.conftest import DatabaseProxy, FetchUsageRows, gateway_client
 from tests.upstream import (
     CHAT_CONFIG,
     CHAT_REQUEST,
+    FAILOVER_CONFIG,
+    GEMINI_KEY,
     GEMINI_URL,
     GROQ_KEY,
     GROQ_URL,
@@ -27,6 +31,22 @@ from tests.upstream import (
 )
 
 WriteConfig = Callable[[str], Settings]
+
+
+async def new_tenant_key(database_url: str) -> NewApiKey:
+    """Create a key of a new tenant, and return it with the ids of its tenant and key."""
+    engine = create_async_engine(database_url)
+    try:
+        return await create_api_key(engine, f"tenant-{uuid4().hex[:8]}")
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+def groq_and_gemini_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enable the fake Groq and Gemini providers."""
+    monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
+    monkeypatch.setenv("GEMINI_API_KEY", GEMINI_KEY)
 
 
 async def test_successful_request_writes_one_usage_row(
@@ -312,3 +332,79 @@ async def test_client_gets_its_response_when_the_usage_log_write_fails(
     request_id = response.headers["X-Gateway-Request-Id"]
     assert f"could not write the usage log of request {request_id}" in caplog.messages
     assert prompt not in caplog.text
+
+
+# --- Tenants: who consumed what ---
+
+
+@pytest.mark.usefixtures("groq_and_gemini_keys")
+async def test_every_row_records_the_tenant_and_key_of_its_request(
+    write_config: WriteConfig,
+    database_url: str,
+    respx_mock: respx.MockRouter,
+    usage_rows: FetchUsageRows,
+) -> None:
+    respx_mock.post(GROQ_URL).respond(503)
+    respx_mock.post(GEMINI_URL).respond(json=completion_body("gemini-2.5-flash"))
+    first, second = await new_tenant_key(database_url), await new_tenant_key(database_url)
+
+    async with gateway_client(write_config(FAILOVER_CONFIG), api_key=first.key) as client:
+        await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+        await client.post(
+            "/v1/chat/completions",
+            json=CHAT_REQUEST,
+            headers={"Authorization": f"Bearer {second.key}"},
+        )
+
+    rows = await usage_rows()
+    assert [(row["tenant_id"], row["api_key_id"], row["outcome"]) for row in rows] == [
+        (first.owner.tenant_id, first.owner.api_key_id, "unavailable"),
+        (first.owner.tenant_id, first.owner.api_key_id, "success"),
+        (second.owner.tenant_id, second.owner.api_key_id, "unavailable"),
+        (second.owner.tenant_id, second.owner.api_key_id, "success"),
+    ]
+
+
+@pytest.mark.usefixtures("groq_and_gemini_keys")
+async def test_request_refused_by_a_tenant_quota_writes_one_row_without_provider(
+    write_config: WriteConfig,
+    database_url: str,
+    respx_mock: respx.MockRouter,
+    usage_rows: FetchUsageRows,
+) -> None:
+    respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
+    tenant = await new_tenant_key(database_url)
+    config = CHAT_CONFIG + "\ntenants:\n  default_limits: { rpm: 1 }\n"
+
+    async with gateway_client(write_config(config), api_key=tenant.key) as client:
+        await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+        refused = await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+
+    assert refused.status_code == 429
+    _, row = await usage_rows()
+    assert row["request_id"] == refused.headers["X-Gateway-Request-Id"]
+    assert row["outcome"] == "rejected_tenant_quota"
+    assert row["status_code"] == 429
+    assert row["tenant_id"] == tenant.owner.tenant_id
+    assert row["api_key_id"] == tenant.owner.api_key_id
+    assert row["alias"] == "chat-fast"
+    assert row["provider"] is None
+    assert row["model"] is None
+    assert row["attempt_index"] == 0
+    assert row["latency_ms"] is None
+    # "user" + "Hi": the prompt length, never the prompt.
+    assert row["prompt_chars"] == 6
+    assert row["degraded"] is False
+
+
+@pytest.mark.usefixtures("groq_and_gemini_keys")
+async def test_request_with_an_invalid_key_writes_no_row(
+    write_config: WriteConfig, respx_mock: respx.MockRouter, usage_rows: FetchUsageRows
+) -> None:
+    respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
+
+    async with gateway_client(write_config(CHAT_CONFIG), api_key="gw_unknown") as client:
+        response = await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+
+    assert response.status_code == 401
+    assert await usage_rows() == []
