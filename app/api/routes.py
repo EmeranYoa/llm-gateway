@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from app.auth.authenticator import Authenticator
 from app.config import GatewayConfig
-from app.routing.acquisition import TargetGate
+from app.routing.acquisition import TargetGate, TenantGate, TenantQuotaExceeded
 from app.routing.router import (
     AllTargetsFailed,
     Attempt,
@@ -43,6 +43,11 @@ def get_router(request: Request) -> Router:
 def get_gate(request: Request) -> TargetGate:
     """Return the shared target state (Redis) built at startup."""
     return cast(TargetGate, request.app.state.gate)
+
+
+def get_tenant_gate(request: Request) -> TenantGate:
+    """Return the tenant quotas (Redis) built at startup."""
+    return cast(TenantGate, request.app.state.tenant_gate)
 
 
 def get_authenticator(request: Request) -> Authenticator:
@@ -122,23 +127,32 @@ async def validation_error_handler(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
-@router.post("/v1/chat/completions", response_model=None, dependencies=[Depends(authenticate)])
+@router.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
     request: ChatCompletionRequest,
     response: Response,
     background_tasks: BackgroundTasks,
+    owner: Annotated[KeyOwner, Depends(authenticate)],
+    tenant_gate: Annotated[TenantGate, Depends(get_tenant_gate)],
     gateway_router: Annotated[Router, Depends(get_router)],
     usage_log: Annotated[UsageLog, Depends(get_usage_log)],
 ) -> dict[str, Any] | JSONResponse:
     """Route an OpenAI chat completion request to a provider/model target.
 
-    Every examined target is written to the usage log after the response is
-    sent, whether the request succeeds or ends in an error.
+    The tenant quotas are checked first: a tenant over its quota gets a 429 and
+    no provider is called. Every examined target is written to the usage log
+    after the response is sent, whether the request succeeds or ends in an error.
     """
     request_id = uuid4().hex
     received_at = dt.datetime.now(dt.UTC)
+    try:
+        admission = await tenant_gate.acquire(owner.tenant_id, owner.limits)
+    except TenantQuotaExceeded as exc:
+        refused = _tenant_quota_response(exc)
+        refused.headers["X-Gateway-Request-Id"] = request_id
+        return refused
     attempts: list[Attempt] = []
-    result = await _route(gateway_router, request, attempts)
+    result = await _route(gateway_router, request, attempts, redis_down=admission.degraded)
     background_tasks.add_task(
         usage_log.write,
         request_id=request_id,
@@ -157,8 +171,30 @@ async def chat_completions(
     return result.body
 
 
+def _tenant_quota_response(exc: TenantQuotaExceeded) -> JSONResponse:
+    """Build the 429 of a tenant over its own quota, distinct from the 503 of busy providers."""
+    response = error_response(
+        429,
+        f"You exceeded your requests-per-minute limit for this gateway ({exc.rpm} requests "
+        "per minute). This is your own tenant quota, not a provider limit.",
+        "rate_limit_error",
+        code="tenant_quota_exceeded",
+    )
+    response.headers["Retry-After"] = _retry_after_header(exc.retry_after)
+    return response
+
+
+def _retry_after_header(seconds: float) -> str:
+    """Whole seconds, rounded up, so the client never comes back too early."""
+    return str(max(1, math.ceil(seconds)))
+
+
 async def _route(
-    gateway_router: Router, request: ChatCompletionRequest, attempts: list[Attempt]
+    gateway_router: Router,
+    request: ChatCompletionRequest,
+    attempts: list[Attempt],
+    *,
+    redis_down: bool,
 ) -> RoutedResponse | JSONResponse:
     """Route the request, or build the OpenAI error response that explains why it failed."""
     if request.stream:
@@ -171,7 +207,10 @@ async def _route(
         )
     try:
         return await gateway_router.route(
-            request.model, request.model_dump(exclude_unset=True), attempts=attempts
+            request.model,
+            request.model_dump(exclude_unset=True),
+            attempts=attempts,
+            redis_down=redis_down,
         )
     except UnknownAlias as exc:
         return error_response(
@@ -208,8 +247,7 @@ async def _route(
     except AllTargetsFailed as exc:
         response = error_response(503, str(exc), "api_error", code="all_targets_failed")
         if exc.retry_after is not None:
-            # Whole seconds, rounded up, so the client never comes back too early.
-            response.headers["Retry-After"] = str(max(1, math.ceil(exc.retry_after)))
+            response.headers["Retry-After"] = _retry_after_header(exc.retry_after)
         return response
     except DeadlineExceeded as exc:
         return error_response(504, str(exc), "api_error", code="deadline_exceeded")

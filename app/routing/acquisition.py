@@ -1,11 +1,15 @@
-"""Shared target state in Redis: can a target be called now, and what happened after the call.
+"""Shared quota state in Redis: may a request go through, and can a target be called now.
+
+Before routing, the API calls `TenantGate.acquire` once per request: one Lua
+script checks and counts the tenant's own quota.
 
 Before calling a target, the router calls `TargetGate.acquire`. One Lua script
 checks, atomically, everything that can block the target: cooldown, circuit
 breaker and quotas (ADR 0001). After the call, the router reports the outcome
 with one of the `record_*` methods, which run another Lua script.
 
-The state lives in Redis so that several gateway instances share it.
+The state lives in Redis so that several gateway instances share it. When Redis
+is unavailable, both gates let requests through without checks (ADR 0002).
 """
 
 import datetime as dt
@@ -17,7 +21,7 @@ from uuid import uuid4
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from app.config import BreakerSection, CooldownSection, Target
+from app.config import BreakerSection, CooldownSection, Target, TenantLimits
 from app.routing.quotas import quota_day
 
 logger = logging.getLogger(__name__)
@@ -260,6 +264,55 @@ class TargetGate:
             ],
         )
         return int(cooldown_ms)
+
+
+class TenantQuotaExceeded(Exception):
+    """The tenant has used up its own quota. No provider is called."""
+
+    def __init__(self, rpm: int, retry_after: float) -> None:
+        super().__init__(f"tenant RPM limit of {rpm} reached ({retry_after:.1f} s left)")
+        self.rpm = rpm
+        self.retry_after = retry_after
+        """Seconds until the tenant may send a request again."""
+
+
+@dataclass(frozen=True)
+class TenantAdmission:
+    """A request the tenant quotas let through."""
+
+    degraded: bool = False
+    """True when Redis was unavailable: the quotas were not checked (ADR 0002)."""
+
+
+class TenantGate:
+    """Tenant quotas, checked once per request before routing."""
+
+    def __init__(self, redis: Redis, default_limits: TenantLimits) -> None:
+        self._default_limits = default_limits
+        self._acquire_script = redis.register_script(_lua("acquire_tenant.lua"))
+
+    async def acquire(self, tenant_id: int, own_limits: TenantLimits) -> TenantAdmission:
+        """Count one request of the tenant, or raise `TenantQuotaExceeded`.
+
+        `own_limits` are the tenant's own limits; a missing one falls back to
+        the default limits of the config. The request stays counted even if
+        routing then fails. When Redis is unavailable, the request is let
+        through without any check (fail open, ADR 0002).
+        """
+        rpm = own_limits.rpm if own_limits.rpm is not None else self._default_limits.rpm
+        try:
+            result = await self._acquire_script(
+                keys=[f"tenant_rpm:{tenant_id}"], args=[uuid4().hex, rpm or 0]
+            )
+        except RedisError as error:
+            logger.warning(
+                "Redis is unavailable (%s): tenant quotas are not checked", type(error).__name__
+            )
+            return TenantAdmission(degraded=True)
+        if result[0] == b"ok":
+            return TenantAdmission()
+        assert rpm is not None, "the script only refuses a request when a limit is set"
+        raise TenantQuotaExceeded(rpm, retry_after=int(result[1]) / 1000)
 
 
 def _key(kind: str, target: Target) -> str:

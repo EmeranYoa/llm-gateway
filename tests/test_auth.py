@@ -2,11 +2,8 @@
 
 import asyncio
 import logging
-import os
 import re
-import sys
 from collections.abc import Callable
-from dataclasses import dataclass
 from uuid import uuid4
 
 import pytest
@@ -15,39 +12,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings
-from tests.conftest import gateway_client, new_api_key
+from tests.conftest import gateway_client, new_api_key, run_admin, run_admin_command
 from tests.upstream import CHAT_CONFIG, CHAT_REQUEST, GROQ_KEY, GROQ_URL, completion_body
-
-
-@dataclass(frozen=True)
-class AdminRun:
-    """Result of one admin CLI command."""
-
-    exit_code: int | None
-    stdout: str
-    stderr: str
-
-
-async def run_admin_command(database_url: str, *args: str) -> AdminRun:
-    """Run the admin CLI as an operator would, whatever its exit code."""
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "app.admin",
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "DATABASE_URL": database_url},
-    )
-    stdout, stderr = await process.communicate()
-    return AdminRun(process.returncode, stdout.decode(), stderr.decode())
-
-
-async def run_admin(database_url: str, *args: str) -> str:
-    """Run an admin CLI command that must succeed, and return what it prints."""
-    run = await run_admin_command(database_url, *args)
-    assert run.exit_code == 0, run.stderr
-    return run.stdout
 
 
 @pytest.fixture

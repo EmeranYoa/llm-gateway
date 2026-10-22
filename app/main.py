@@ -22,7 +22,7 @@ from app.auth.authenticator import AuthenticationUnavailable, Authenticator, Inv
 from app.config import Settings, load_config
 from app.providers.base import Provider
 from app.providers.openai_compat import OpenAICompatibleProvider
-from app.routing.acquisition import TargetGate
+from app.routing.acquisition import TargetGate, TenantGate
 from app.routing.router import Router
 from app.storage.usage import UsageLog
 
@@ -72,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.config = config
     gate = TargetGate(redis_client, config.cooldown, config.breaker)
     app.state.gate = gate
+    app.state.tenant_gate = TenantGate(redis_client, config.tenant_default_limits)
     app.state.router = Router(
         config.routes,
         providers,

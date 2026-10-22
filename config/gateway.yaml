@@ -16,6 +16,13 @@ gateway:
     window: 60 # seconds
     open: 30 # seconds it stays open before a single trial call is let through
 
+tenants:
+  # Quotas of each tenant (client application), on top of the provider limits.
+  # A missing limit means "no limit". Override them per tenant with:
+  #   python -m app.admin set-limits --tenant NAME --rpm N
+  default_limits:
+    rpm: 60 # requests per minute, sliding 60 s window; failed requests count too
+
 providers:
   # https://console.groq.com/docs/rate-limits (free plan)
   groq:

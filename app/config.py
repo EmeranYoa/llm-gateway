@@ -129,8 +129,21 @@ class GatewaySection(_FileModel):
         return self
 
 
+class TenantLimits(_FileModel):
+    """Quotas of a tenant. A missing limit means "no limit"."""
+
+    rpm: int | None = Field(default=None, gt=0)
+    """Requests per minute, over a 60 s sliding window."""
+
+
+class TenantsSection(_FileModel):
+    default_limits: TenantLimits = TenantLimits()
+    """Limits of every tenant that has no limits of its own (set with `set-limits`)."""
+
+
 class FileConfig(_FileModel):
     gateway: GatewaySection = GatewaySection()
+    tenants: TenantsSection = TenantsSection()
     providers: dict[str, ProviderConfig]
     routes: dict[str, list[str]]
 
@@ -168,6 +181,7 @@ class GatewayConfig:
     default_completion_tokens: int
     cooldown: CooldownSection
     breaker: BreakerSection
+    tenant_default_limits: TenantLimits
     routes: Mapping[str, tuple[Target, ...]]
     enabled_providers: tuple[str, ...]
     disabled_providers: tuple[str, ...]
@@ -189,6 +203,7 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
         default_completion_tokens=file_config.gateway.default_completion_tokens,
         cooldown=file_config.gateway.cooldown,
         breaker=file_config.gateway.breaker,
+        tenant_default_limits=file_config.tenants.default_limits,
         routes=_resolve_routes(file_config, providers),
         enabled_providers=tuple(providers),
         disabled_providers=tuple(disabled),

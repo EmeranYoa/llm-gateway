@@ -57,6 +57,14 @@ def test_startup_fails_when_route_references_unknown_model(
             """,
         ),
         (
+            "zero tenant limit",
+            "tenants: {default_limits: {rpm: 0}}\nproviders: {}\nroutes: {}",
+        ),
+        (
+            "unknown tenant limit",
+            "tenants: {default_limits: {requests_per_hour: 10}}\nproviders: {}\nroutes: {}",
+        ),
+        (
             "unknown timezone",
             """
             providers:

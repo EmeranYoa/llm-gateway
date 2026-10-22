@@ -11,14 +11,17 @@ from sqlalchemy import (
     Identity,
     String,
     Text,
+    func,
     insert,
     select,
     update,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.auth.keys import display_prefix, generate_key, hash_key
+from app.config import TenantLimits
 from app.storage.db import Base
 
 
@@ -29,6 +32,8 @@ class TenantRow(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(Text, unique=True)
+    rpm: Mapped[int | None]
+    """Requests per minute of the tenant, or NULL to use the default of `gateway.yaml`."""
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -53,6 +58,8 @@ class KeyOwner:
     api_key_id: int
     tenant_id: int
     tenant_name: str
+    limits: TenantLimits
+    """The tenant's own limits. A missing limit means "use the default of `gateway.yaml`"."""
 
 
 @dataclass(frozen=True)
@@ -63,18 +70,23 @@ class NewApiKey:
     owner: KeyOwner
 
 
-async def create_api_key(engine: AsyncEngine, tenant_name: str) -> NewApiKey:
-    """Create a key for `tenant_name`, creating the tenant first if it does not exist."""
+async def create_api_key(
+    engine: AsyncEngine, tenant_name: str, *, rpm: int | None = None
+) -> NewApiKey:
+    """Create a key for `tenant_name`, creating the tenant first if it does not exist.
+
+    `rpm`, when given, becomes the tenant's own requests-per-minute limit.
+    """
     key = generate_key()
     now = dt.datetime.now(dt.UTC)
+    # Insert the tenant, or, if it exists already, update only the limits given.
+    new_tenant = postgresql.insert(TenantRow).values(name=tenant_name, rpm=rpm, created_at=now)
+    upsert_tenant = new_tenant.on_conflict_do_update(
+        index_elements=[TenantRow.name],
+        set_={"rpm": func.coalesce(new_tenant.excluded.rpm, TenantRow.rpm)},
+    ).returning(TenantRow.id, TenantRow.rpm)
     async with engine.begin() as connection:
-        tenant_id = await connection.scalar(
-            select(TenantRow.id).where(TenantRow.name == tenant_name)
-        )
-        if tenant_id is None:
-            tenant_id = await connection.scalar(
-                insert(TenantRow).values(name=tenant_name, created_at=now).returning(TenantRow.id)
-            )
+        tenant_id, own_rpm = (await connection.execute(upsert_tenant)).one()
         api_key_id = await connection.scalar(
             insert(ApiKeyRow)
             .values(
@@ -85,8 +97,25 @@ async def create_api_key(engine: AsyncEngine, tenant_name: str) -> NewApiKey:
             )
             .returning(ApiKeyRow.id)
         )
-    assert tenant_id is not None and api_key_id is not None
-    return NewApiKey(key=key, owner=KeyOwner(api_key_id, tenant_id, tenant_name))
+    assert api_key_id is not None
+    owner = KeyOwner(api_key_id, tenant_id, tenant_name, TenantLimits(rpm=own_rpm))
+    return NewApiKey(key=key, owner=owner)
+
+
+async def set_tenant_limits(engine: AsyncEngine, tenant_name: str, *, rpm: int) -> bool:
+    """Set the tenant's own requests-per-minute limit. Returns False for an unknown tenant.
+
+    Gateways see the new limit when they next check the tenant's keys in the database.
+    """
+    statement = (
+        update(TenantRow)
+        .where(TenantRow.name == tenant_name)
+        .values(rpm=rpm)
+        .returning(TenantRow.id)
+    )
+    async with engine.begin() as connection:
+        tenant_id = await connection.scalar(statement)
+    return tenant_id is not None
 
 
 @dataclass(frozen=True)
@@ -153,7 +182,7 @@ async def revoke_api_key(engine: AsyncEngine, api_key_id: int) -> Revocation:
 async def find_key_owner(engine: AsyncEngine, key: str) -> KeyOwner | None:
     """Return who owns `key`, or None when the key is unknown or revoked."""
     query = (
-        select(ApiKeyRow.id, TenantRow.id, TenantRow.name)
+        select(ApiKeyRow.id, TenantRow.id, TenantRow.name, TenantRow.rpm)
         .join(TenantRow, ApiKeyRow.tenant_id == TenantRow.id)
         .where(ApiKeyRow.key_hash == hash_key(key), ApiKeyRow.revoked_at.is_(None))
     )
@@ -161,5 +190,5 @@ async def find_key_owner(engine: AsyncEngine, key: str) -> KeyOwner | None:
         row = (await connection.execute(query)).first()
     if row is None:
         return None
-    api_key_id, tenant_id, tenant_name = row
-    return KeyOwner(api_key_id, tenant_id, tenant_name)
+    api_key_id, tenant_id, tenant_name, rpm = row
+    return KeyOwner(api_key_id, tenant_id, tenant_name, TenantLimits(rpm=rpm))

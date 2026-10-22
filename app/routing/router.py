@@ -233,7 +233,12 @@ class Router:
         self._default_completion_tokens = default_completion_tokens
 
     async def route(
-        self, alias: str, body: dict[str, Any], *, attempts: list[Attempt]
+        self,
+        alias: str,
+        body: dict[str, Any],
+        *,
+        attempts: list[Attempt],
+        redis_down: bool = False,
     ) -> RoutedResponse:
         """Send the request to the targets of `alias` in order, until one answers.
 
@@ -254,6 +259,9 @@ class Router:
         Every examined target is appended to `attempts`, whether routing succeeds
         or raises, so the caller can log the full routing path in both cases.
 
+        `redis_down` tells that Redis already failed for this request (during
+        the tenant quota check): targets are then called without waiting for it.
+
         Raises:
             UnknownAlias: the alias is not defined.
             NoEnabledTarget: none of the alias targets can be used.
@@ -273,7 +281,6 @@ class Router:
         failures: list[tuple[Target, ProviderError | Refusal]] = []
         waits: list[float] = []
         # Once Redis has failed for this request, do not wait for it again.
-        redis_down = False
         for index, target in enumerate(targets):
             remaining = deadline_at - time.monotonic()
             if remaining < self._min_attempt_time:

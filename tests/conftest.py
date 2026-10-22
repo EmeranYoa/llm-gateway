@@ -2,8 +2,10 @@
 
 import asyncio
 import os
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
@@ -197,3 +199,37 @@ async def silent_server() -> AsyncIterator[int]:
         writer.close()
     server.close()
     await server.wait_closed()
+
+
+# --- Admin CLI, run as an operator would: a real subprocess ---
+
+
+@dataclass(frozen=True)
+class AdminRun:
+    """Result of one admin CLI command."""
+
+    exit_code: int | None
+    stdout: str
+    stderr: str
+
+
+async def run_admin_command(database_url: str, *args: str) -> AdminRun:
+    """Run the admin CLI as an operator would, whatever its exit code."""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "app.admin",
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "DATABASE_URL": database_url},
+    )
+    stdout, stderr = await process.communicate()
+    return AdminRun(process.returncode, stdout.decode(), stderr.decode())
+
+
+async def run_admin(database_url: str, *args: str) -> str:
+    """Run an admin CLI command that must succeed, and return what it prints."""
+    run = await run_admin_command(database_url, *args)
+    assert run.exit_code == 0, run.stderr
+    return run.stdout

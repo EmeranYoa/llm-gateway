@@ -1,9 +1,10 @@
 """Admin command line: manage tenants and their gateway API keys.
 
 Usage:
-    python -m app.admin create-key --tenant acme
+    python -m app.admin create-key --tenant acme [--rpm 60]
     python -m app.admin list-keys [--tenant acme]
     python -m app.admin revoke-key 12
+    python -m app.admin set-limits --tenant acme --rpm 120
 
 A full key is printed only once, by create-key. Other commands show a short prefix.
 It uses the same `DATABASE_URL` as the gateway.
@@ -24,6 +25,7 @@ from app.storage.tenants import (
     create_api_key,
     list_api_keys,
     revoke_api_key,
+    set_tenant_limits,
 )
 
 
@@ -38,6 +40,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "create-key", help="create an API key (and the tenant if needed), and print it once"
     )
     create.add_argument("--tenant", required=True, help="tenant name, for example acme")
+    create.add_argument("--rpm", type=_positive_int, help="requests per minute of the tenant")
 
     list_keys = commands.add_parser(
         "list-keys", help="list API keys with their prefix and status, never the full key"
@@ -47,20 +50,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     revoke = commands.add_parser("revoke-key", help="revoke an API key: requests with it get 401")
     revoke.add_argument("id", type=int, help="key id, as shown by list-keys")
 
+    set_limits = commands.add_parser(
+        "set-limits", help="set the tenant's own limits, instead of the defaults of gateway.yaml"
+    )
+    set_limits.add_argument("--tenant", required=True, help="tenant name")
+    set_limits.add_argument(
+        "--rpm", type=_positive_int, required=True, help="requests per minute of the tenant"
+    )
+
     args = parser.parse_args(argv)
     if args.command == "create-key":
-        return asyncio.run(_create_key(args.tenant))
+        return asyncio.run(_create_key(args.tenant, args.rpm))
     if args.command == "list-keys":
         return asyncio.run(_list_keys(args.tenant))
     if args.command == "revoke-key":
         return asyncio.run(_revoke_key(args.id))
+    if args.command == "set-limits":
+        return asyncio.run(_set_limits(args.tenant, args.rpm))
     return 1
 
 
-async def _create_key(tenant: str) -> int:
+async def _create_key(tenant: str, rpm: int | None) -> int:
     engine = create_async_engine(Settings().database_url)
     try:
-        new_key = await create_api_key(engine, tenant)
+        new_key = await create_api_key(engine, tenant, rpm=rpm)
     finally:
         await engine.dispose()
     print(f"API key for tenant '{tenant}' (shown only once, store it now):")
@@ -93,6 +106,26 @@ async def _revoke_key(api_key_id: int) -> int:
         case Revocation.ALREADY_REVOKED:
             print(f"Error: API key {api_key_id} is already revoked.", file=sys.stderr)
     return 1
+
+
+async def _set_limits(tenant: str, rpm: int) -> int:
+    engine = create_async_engine(Settings().database_url)
+    try:
+        found = await set_tenant_limits(engine, tenant, rpm=rpm)
+    finally:
+        await engine.dispose()
+    if not found:
+        print(f"Error: unknown tenant '{tenant}'.", file=sys.stderr)
+        return 1
+    print(f"Limits of tenant '{tenant}' updated: {rpm} requests per minute.")
+    return 0
+
+
+def _positive_int(value: str) -> int:
+    """Parse a limit given on the command line: a whole number above zero."""
+    if not value.isdigit() or int(value) == 0:
+        raise argparse.ArgumentTypeError(f"must be a positive whole number, got {value!r}")
+    return int(value)
 
 
 KEY_COLUMNS = ("ID", "TENANT", "PREFIX", "CREATED (UTC)", "LAST USED (UTC)", "STATUS")
