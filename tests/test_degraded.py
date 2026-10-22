@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 
 from app.config import Settings
 from tests.conftest import FetchUsageRows, gateway_client
+from tests.test_streaming import STREAM_REQUEST, read_stream
 from tests.upstream import (
     CHAT_REQUEST,
     FAILOVER_CONFIG,
@@ -18,7 +19,9 @@ from tests.upstream import (
     GEMINI_URL,
     GROQ_KEY,
     GROQ_URL,
+    chunk,
     completion_body,
+    stream_response,
 )
 
 WriteConfig = Callable[[str], Settings]
@@ -171,4 +174,48 @@ async def test_authentication_is_still_enforced_when_redis_is_down(
 
     # Fail closed (ADR 0004): a Redis outage never opens the gateway to unknown keys.
     assert response.status_code == 401
+    assert not groq.called
+
+
+async def test_streams_are_served_with_failover_when_redis_is_down(
+    write_config: WriteConfig, respx_mock: respx.MockRouter, usage_rows: FetchUsageRows
+) -> None:
+    respx_mock.post(GROQ_URL).respond(500)
+    respx_mock.post(GEMINI_URL).mock(
+        side_effect=lambda _: stream_response(chunk("From Gemini"), "[DONE]")
+    )
+    settings = write_config(TIGHT_TENANT_QUOTAS + FAILOVER_CONFIG).model_copy(
+        update={"redis_url": UNREACHABLE_REDIS}
+    )
+
+    async with gateway_client(settings) as client:
+        streams = [await read_stream(client, STREAM_REQUEST) for _ in range(2)]
+
+    # Like normal requests: no quota checks (the tight tenant quotas would refuse
+    # the second stream), and failover still works before the first content.
+    assert [response.status_code for response, _ in streams] == [200, 200]
+    assert all(payloads[-1] == "[DONE]" for _, payloads in streams)
+    assert all(response.headers["X-Gateway-Provider"] == "gemini" for response, _ in streams)
+    rows = await usage_rows()
+    assert [(row["outcome"], row["degraded"], row["stream"]) for row in rows] == [
+        ("unavailable", True, True),
+        ("success", True, True),
+    ] * 2
+
+
+async def test_stream_authentication_is_still_enforced_when_redis_is_down(
+    write_config: WriteConfig, respx_mock: respx.MockRouter
+) -> None:
+    groq = respx_mock.post(GROQ_URL).mock(
+        side_effect=lambda _: stream_response(chunk("Hello"), "[DONE]")
+    )
+    headers = {"Authorization": "Bearer gw_not-a-real-key"}
+
+    async with gateway_client(
+        settings_with_redis(write_config, UNREACHABLE_REDIS), api_key=None
+    ) as client:
+        response = await client.post("/v1/chat/completions", json=STREAM_REQUEST, headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
     assert not groq.called
