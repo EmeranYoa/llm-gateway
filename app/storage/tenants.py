@@ -2,8 +2,19 @@
 
 import datetime as dt
 from dataclasses import dataclass
+from enum import Enum
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, String, Text, insert, select
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Identity,
+    String,
+    Text,
+    insert,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -76,6 +87,67 @@ async def create_api_key(engine: AsyncEngine, tenant_name: str) -> NewApiKey:
         )
     assert tenant_id is not None and api_key_id is not None
     return NewApiKey(key=key, owner=KeyOwner(api_key_id, tenant_id, tenant_name))
+
+
+@dataclass(frozen=True)
+class ApiKeyInfo:
+    """What an operator may see about a key: never the key itself, only its prefix."""
+
+    id: int
+    tenant_name: str
+    prefix: str
+    created_at: dt.datetime
+    last_used_at: dt.datetime | None
+    revoked_at: dt.datetime | None
+
+
+async def list_api_keys(engine: AsyncEngine, tenant_name: str | None = None) -> list[ApiKeyInfo]:
+    """Return the keys of every tenant, or of `tenant_name` only, oldest first."""
+    query = (
+        select(
+            ApiKeyRow.id,
+            TenantRow.name,
+            ApiKeyRow.prefix,
+            ApiKeyRow.created_at,
+            ApiKeyRow.last_used_at,
+            ApiKeyRow.revoked_at,
+        )
+        .join(TenantRow, ApiKeyRow.tenant_id == TenantRow.id)
+        .order_by(ApiKeyRow.id)
+    )
+    if tenant_name is not None:
+        query = query.where(TenantRow.name == tenant_name)
+    async with engine.connect() as connection:
+        rows = (await connection.execute(query)).all()
+    return [ApiKeyInfo(*row) for row in rows]
+
+
+class Revocation(Enum):
+    """Result of a request to revoke a key."""
+
+    REVOKED = "revoked"
+    NOT_FOUND = "not_found"
+    ALREADY_REVOKED = "already_revoked"
+
+
+async def revoke_api_key(engine: AsyncEngine, api_key_id: int) -> Revocation:
+    """Revoke a key: requests that use it are refused from now on.
+
+    An already revoked key keeps its first revocation date.
+    """
+    async with engine.begin() as connection:
+        revoked_id = await connection.scalar(
+            update(ApiKeyRow)
+            .where(ApiKeyRow.id == api_key_id, ApiKeyRow.revoked_at.is_(None))
+            .values(revoked_at=dt.datetime.now(dt.UTC))
+            .returning(ApiKeyRow.id)
+        )
+        if revoked_id is not None:
+            return Revocation.REVOKED
+        existing_id = await connection.scalar(
+            select(ApiKeyRow.id).where(ApiKeyRow.id == api_key_id)
+        )
+    return Revocation.NOT_FOUND if existing_id is None else Revocation.ALREADY_REVOKED
 
 
 async def find_key_owner(engine: AsyncEngine, key: str) -> KeyOwner | None:
