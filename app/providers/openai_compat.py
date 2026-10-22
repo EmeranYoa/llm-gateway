@@ -67,14 +67,7 @@ class OpenAICompatibleProvider(Provider):
             raise ProviderUnavailable(f"network error ({type(exc).__name__})") from exc
         _raise_for_error_status(response)
         body = response.json()
-        usage = body.get("usage") if isinstance(body, dict) else None
-        if not isinstance(usage, dict):
-            usage = {}
-        return ProviderResponse(
-            body=body,
-            prompt_tokens=_int_or_none(usage.get("prompt_tokens")),
-            completion_tokens=_int_or_none(usage.get("completion_tokens")),
-        )
+        return ProviderResponse(body, *_reported_usage(body))
 
     async def stream_chat_completion(
         self,
@@ -101,7 +94,7 @@ class OpenAICompatibleProvider(Provider):
                     event = json.loads(data)
                     if isinstance(event, dict) and "error" in event:
                         raise _stream_error(event["error"])
-                    yield StreamChunk(event)
+                    yield StreamChunk(event, *_reported_usage(event))
         except httpx.TimeoutException as exc:
             raise ProviderTimeout() from exc
         except httpx.TransportError as exc:
@@ -257,6 +250,14 @@ def _is_context_too_large(error: InvalidRequest) -> bool:
 def _text_or_none(value: object) -> str | None:
     """Keep only string values: some providers use numbers where OpenAI uses strings."""
     return value if isinstance(value, str) and value else None
+
+
+def _reported_usage(body: object) -> tuple[int | None, int | None]:
+    """The prompt and completion tokens in the `usage` field of `body`, or None for each."""
+    usage = body.get("usage") if isinstance(body, dict) else None
+    if not isinstance(usage, dict):
+        return None, None
+    return _int_or_none(usage.get("prompt_tokens")), _int_or_none(usage.get("completion_tokens"))
 
 
 def _int_or_none(value: object) -> int | None:

@@ -212,7 +212,7 @@ async def chat_completions(
     if isinstance(result, CommittedStream):
         # The usage log task runs once the whole stream has been sent.
         return StreamingResponse(
-            _sse_events(result),
+            _sse_events(result, tenant_gate, admission),
             media_type="text/event-stream",
             headers=_routing_headers(result.target, result.fallbacks, request_id),
         )
@@ -262,11 +262,16 @@ def _routing_headers(target: Target, fallbacks: int, request_id: str) -> dict[st
     }
 
 
-async def _sse_events(stream: CommittedStream) -> AsyncIterator[str]:
+async def _sse_events(
+    stream: CommittedStream, tenant_gate: TenantGate, admission: TenantAdmission
+) -> AsyncIterator[str]:
     """Send each chunk as a Server-Sent Event, with `model` set to the real model.
 
     A stream that breaks after its first content ends with an error event and no
     `[DONE]`, so the client never takes a truncated answer for a complete one.
+
+    A complete stream corrects the tenant budget with its usage. A broken or
+    cancelled one keeps the estimate: the provider may have used those tokens.
     """
     try:
         async for chunk in stream.chunks():
@@ -279,6 +284,8 @@ async def _sse_events(stream: CommittedStream) -> AsyncIterator[str]:
         )
         yield _sse(ErrorBody(error=error).model_dump())
         return
+    if stream.usage is not None:
+        await tenant_gate.record_success(admission, stream.usage.used_tokens)
     yield "data: [DONE]\n\n"
 
 

@@ -20,7 +20,12 @@ CHARS_PER_TOKEN = 4
 
 def estimate_prompt_tokens(body: Mapping[str, Any]) -> int:
     """Estimate the prompt size in tokens, from every string the model reads."""
-    return math.ceil(count_prompt_chars(body) / CHARS_PER_TOKEN)
+    return estimate_tokens(count_prompt_chars(body))
+
+
+def estimate_tokens(chars: int) -> int:
+    """Estimate the number of tokens of `chars` characters of text."""
+    return math.ceil(chars / CHARS_PER_TOKEN)
 
 
 def estimate_call_tokens(

@@ -4,6 +4,7 @@ The router only talks to this interface. It never depends on details of a
 specific provider (URLs, headers, error formats).
 """
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -31,9 +32,15 @@ class ProviderResponse:
 
 @dataclass(frozen=True)
 class StreamChunk:
-    """One chunk of a streamed chat completion, as the provider sent it (OpenAI format)."""
+    """One chunk of a streamed chat completion, as the provider sent it (OpenAI format).
+
+    Token counts come from the `usage` field of the chunk, or are None when it has none.
+    Providers send the usage of the whole stream in its last chunk (or one of the last).
+    """
 
     data: dict[str, Any]
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
     @property
     def has_content(self) -> bool:
@@ -44,13 +51,30 @@ class StreamChunk:
         Reasoning counts: reasoning models think before they answer, and holding
         their reasoning back would leave the client with nothing to show.
         """
-        for choice in self.data.get("choices") or []:
-            if not isinstance(choice, dict):
-                continue
-            delta = choice.get("delta") or {}
-            if any(delta.get(field) for field in _CONTENT_FIELDS):
-                return True
-        return False
+        return any(delta.get(field) for delta in self._deltas() for field in _CONTENT_FIELDS)
+
+    @property
+    def output_chars(self) -> int:
+        """Number of characters of output in the chunk: text, reasoning and tool calls.
+
+        Used to estimate the completion of a stream whose provider reports no usage.
+        """
+        chars = 0
+        for delta in self._deltas():
+            for field in _CONTENT_FIELDS:
+                value = delta.get(field)
+                if isinstance(value, str):
+                    chars += len(value)
+                elif value:
+                    chars += len(json.dumps(value))
+        return chars
+
+    def _deltas(self) -> list[dict[str, Any]]:
+        return [
+            choice.get("delta") or {}
+            for choice in self.data.get("choices") or []
+            if isinstance(choice, dict)
+        ]
 
 
 # Fields of a stream delta that carry output for the client. Providers name the

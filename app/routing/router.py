@@ -26,7 +26,7 @@ from app.providers.base import (
 )
 from app.routing.acquisition import Refusal, Reservation, TargetGate
 from app.routing.quotas import estimate_call_tokens, estimate_prompt_tokens
-from app.routing.streaming import CommittedStream
+from app.routing.streaming import CommittedStream, StreamUsage
 
 logger = logging.getLogger(__name__)
 
@@ -334,12 +334,18 @@ class Router:
         the stream. The tokens are corrected and the attempt appended to
         `attempts` when the stream ends.
 
+        The provider is always asked for the usage of the stream, which the quotas
+        need. When the client did not ask for it, it is removed from the chunks
+        the client gets (ADR 0005).
+
         Raises the same errors as `route`.
         """
+        client_asks_usage = _asks_for_usage(body)
+        upstream_body = body if client_asks_usage else _with_usage(body)
 
         async def answer(call: _Call) -> CommittedStream:
             stream = call.provider.stream_chat_completion(
-                call.target.model, body, timeout=call.timeout
+                call.target.model, upstream_body, timeout=call.timeout
             )
             try:
                 read_so_far = await _read_until_content(stream, call.timeout)
@@ -351,8 +357,8 @@ class Router:
             first_token_ms = call.elapsed_ms() if sent_content else None
             await self._gate.record_commit(call.target, call.reservation)
 
-            async def on_end() -> None:
-                await self._gate.record_stream_end(call.target, call.reservation, None)
+            async def on_end(usage: StreamUsage) -> None:
+                await self._gate.record_stream_end(call.target, call.reservation, usage.used_tokens)
                 attempts.append(
                     Attempt(
                         call.target,
@@ -360,6 +366,8 @@ class Router:
                         latency_ms=call.elapsed_ms(),
                         first_token_ms=first_token_ms,
                         status_code=HTTPStatus.OK,
+                        prompt_tokens=usage.prompt_tokens,
+                        completion_tokens=usage.completion_tokens,
                         estimated_tokens=call.reservation.tokens,
                         degraded=call.reservation.degraded,
                     )
@@ -391,6 +399,8 @@ class Router:
                 read_so_far,
                 stream,
                 limits=self._stream_limits,
+                prompt_estimate=estimate_prompt_tokens(body),
+                hide_usage=not client_asks_usage,
                 on_end=on_end,
                 on_interrupted=on_interrupted,
                 on_cancelled=on_cancelled,
@@ -550,6 +560,19 @@ class _Call:
 
     def elapsed_ms(self) -> int:
         return _elapsed_ms(self.started)
+
+
+def _asks_for_usage(body: dict[str, Any]) -> bool:
+    """True when a streamed request asks for the usage chunk itself."""
+    options = body.get("stream_options")
+    return isinstance(options, dict) and options.get("include_usage") is True
+
+
+def _with_usage(body: dict[str, Any]) -> dict[str, Any]:
+    """The request with `include_usage` added to its stream options, the others kept."""
+    options = body.get("stream_options")
+    kept = options if isinstance(options, dict) else {}
+    return {**body, "stream_options": {**kept, "include_usage": True}}
 
 
 async def _read_until_content(
