@@ -320,6 +320,8 @@ async def test_stream_broken_after_the_first_content_ends_with_an_error_event(
     stream_rows = [row for row in await usage_rows() if row["provider"] == "groq"]
     assert stream_rows[0]["outcome"] == "interrupted"
     assert stream_rows[0]["status_code"] == 200
+    # The stream had started: its time to first content is known.
+    assert stream_rows[0]["first_token_ms"] is not None
 
 
 @pytest.mark.parametrize(
@@ -412,3 +414,85 @@ async def test_interrupted_stream_keeps_its_reserved_tokens(
     # The interrupted call kept its tokens, so Groq has no room left for a second one.
     assert second.headers["X-Gateway-Provider"] == "gemini"
     assert [row["outcome"] for row in await usage_rows()][-2:] == ["skipped_quota", "success"]
+
+
+# --- Usage log ---
+
+
+async def test_streamed_request_is_marked_as_streamed_on_every_usage_row(
+    failover_client: AsyncClient, respx_mock: respx.MockRouter, usage_rows: FetchUsageRows
+) -> None:
+    respx_mock.post(GROQ_URL).respond(503)
+    respx_mock.post(GEMINI_URL).mock(return_value=stream_response(*GEMINI_STREAM))
+
+    response, _ = await read_stream(failover_client, STREAM_REQUEST)
+
+    assert response.status_code == 200
+    rows = await usage_rows()
+    assert [(row["provider"], row["outcome"], row["stream"]) for row in rows] == [
+        ("groq", "unavailable", True),
+        ("gemini", "success", True),
+    ]
+    # Only the attempt that answered has a first content.
+    assert rows[0]["first_token_ms"] is None
+    assert rows[1]["first_token_ms"] is not None
+
+
+async def test_usage_row_measures_the_first_content_and_the_whole_stream(
+    chat_client: AsyncClient, respx_mock: respx.MockRouter, usage_rows: FetchUsageRows
+) -> None:
+    async def upstream_body() -> AsyncIterator[bytes]:
+        yield sse(chunk(role="assistant", content=""))  # no content yet
+        await asyncio.sleep(0.3)
+        yield sse(chunk("Hello"))  # the first content: the commit point
+        await asyncio.sleep(0.3)
+        yield sse("[DONE]")
+
+    respx_mock.post(GROQ_URL).mock(
+        return_value=httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=upstream_body()
+        )
+    )
+
+    await read_stream(chat_client, STREAM_REQUEST)
+
+    [row] = await usage_rows()
+    # Tolerant bounds: timers on Windows can fire up to ~16 ms early.
+    assert 280 <= row["first_token_ms"] < 550
+    assert row["latency_ms"] >= 580
+    assert row["latency_ms"] - row["first_token_ms"] >= 280
+
+
+async def test_usage_row_of_an_empty_stream_has_no_first_content_time(
+    chat_client: AsyncClient, respx_mock: respx.MockRouter, usage_rows: FetchUsageRows
+) -> None:
+    respx_mock.post(GROQ_URL).mock(
+        return_value=stream_response(chunk(role="assistant", content=""), "[DONE]")
+    )
+
+    await read_stream(chat_client, STREAM_REQUEST)
+
+    [row] = await usage_rows()
+    assert row["outcome"] == "success"
+    assert row["first_token_ms"] is None
+
+
+async def test_streamed_request_refused_by_a_tenant_quota_is_marked_as_streamed(
+    make_client: ClientFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+    usage_rows: FetchUsageRows,
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
+    respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
+    config = CHAT_CONFIG + "\ntenants:\n  default_limits: { rpm: 1 }\n"
+
+    async with make_client(config) as client:
+        await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+        refused = await client.post("/v1/chat/completions", json=STREAM_REQUEST)
+
+    assert refused.status_code == 429
+    allowed, rejected = await usage_rows()
+    assert (allowed["outcome"], allowed["stream"]) == ("success", False)
+    assert (rejected["outcome"], rejected["stream"]) == ("rejected_tenant_quota", True)
+    assert rejected["first_token_ms"] is None

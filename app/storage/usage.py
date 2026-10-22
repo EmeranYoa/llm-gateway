@@ -64,11 +64,16 @@ class UsageLogRow(Base):
     outcome: Mapped[str] = mapped_column(String(32))
     status_code: Mapped[int | None]
     latency_ms: Mapped[int | None]
+    """Total duration of the attempt. For a stream, until its last chunk."""
+    first_token_ms: Mapped[int | None]
+    """Time to the first content of a streamed answer. NULL for any other row."""
     prompt_chars: Mapped[int]
     estimated_tokens: Mapped[int | None]
     prompt_tokens: Mapped[int | None]
     completion_tokens: Mapped[int | None]
     degraded: Mapped[bool] = mapped_column(server_default=false())
+    stream: Mapped[bool] = mapped_column(server_default=false())
+    """True for every row of a request sent with `stream: true`."""
     error_message: Mapped[str | None] = mapped_column(String(ERROR_MESSAGE_MAX_CHARS))
 
 
@@ -86,11 +91,13 @@ class UsageLog:
         owner: KeyOwner,
         alias: str,
         prompt_chars: int,
+        stream: bool,
         attempts: Sequence[Attempt],
     ) -> None:
         """Insert one row per attempt, in a single multi-row INSERT.
 
-        Every row records the tenant and the API key (`owner`) that made the request.
+        Every row records the tenant and the API key (`owner`) that made the request,
+        and whether the client asked for a streamed answer (`stream`).
 
         Nothing is written when no target was examined (unknown alias, streaming refused).
         This runs after the response is sent, so a database error is logged and never
@@ -98,7 +105,14 @@ class UsageLog:
         """
         if not attempts:
             return
-        request_columns = _request_columns(request_id, received_at, owner, alias, prompt_chars)
+        request_columns = _request_columns(
+            request_id=request_id,
+            received_at=received_at,
+            owner=owner,
+            alias=alias,
+            prompt_chars=prompt_chars,
+            stream=stream,
+        )
         rows = [
             {
                 **request_columns,
@@ -108,6 +122,7 @@ class UsageLog:
                 "outcome": attempt.outcome,
                 "status_code": attempt.status_code,
                 "latency_ms": attempt.latency_ms,
+                "first_token_ms": attempt.first_token_ms,
                 "estimated_tokens": attempt.estimated_tokens,
                 "degraded": attempt.degraded,
                 "prompt_tokens": attempt.prompt_tokens,
@@ -126,6 +141,7 @@ class UsageLog:
         owner: KeyOwner,
         alias: str,
         prompt_chars: int,
+        stream: bool,
         reason: str,
     ) -> None:
         """Insert the single row of a request refused by its tenant quota.
@@ -134,7 +150,14 @@ class UsageLog:
         Like `write`, a database error is logged and never raised.
         """
         row = {
-            **_request_columns(request_id, received_at, owner, alias, prompt_chars),
+            **_request_columns(
+                request_id=request_id,
+                received_at=received_at,
+                owner=owner,
+                alias=alias,
+                prompt_chars=prompt_chars,
+                stream=stream,
+            ),
             "attempt_index": 0,
             "outcome": REJECTED_TENANT_QUOTA,
             "status_code": 429,
@@ -153,7 +176,13 @@ class UsageLog:
 
 
 def _request_columns(
-    request_id: str, received_at: dt.datetime, owner: KeyOwner, alias: str, prompt_chars: int
+    *,
+    request_id: str,
+    received_at: dt.datetime,
+    owner: KeyOwner,
+    alias: str,
+    prompt_chars: int,
+    stream: bool,
 ) -> dict[str, Any]:
     """The columns shared by every row of a request."""
     return {
@@ -163,6 +192,7 @@ def _request_columns(
         "api_key_id": owner.api_key_id,
         "alias": alias,
         "prompt_chars": prompt_chars,
+        "stream": stream,
     }
 
 

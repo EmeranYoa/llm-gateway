@@ -88,6 +88,8 @@ async def test_success_row_stores_prompt_length_and_real_token_usage(
     assert row["estimated_tokens"] == 8 + 512
     assert row["degraded"] is False
     assert row["error_message"] is None
+    assert row["stream"] is False
+    assert row["first_token_ms"] is None
     assert before <= row["created_at"] <= dt.datetime.now(dt.UTC)
 
 

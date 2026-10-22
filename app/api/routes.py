@@ -174,6 +174,7 @@ async def chat_completions(
             owner=owner,
             alias=request.model,
             prompt_chars=request.prompt_chars(),
+            stream=request.stream,
             reason=str(exc),
         )
         refused = _tenant_quota_response(exc)
@@ -190,6 +191,7 @@ async def chat_completions(
         owner=owner,
         alias=request.model,
         prompt_chars=request.prompt_chars(),
+        stream=request.stream,
         attempts=attempts,
     )
     if isinstance(result, JSONResponse):

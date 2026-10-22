@@ -113,6 +113,9 @@ class Attempt:
     target: Target
     outcome: Outcome
     latency_ms: int | None = None
+    """Total duration of the call. For a stream, until its last chunk."""
+    first_token_ms: int | None = None
+    """For a streamed answer: time from the start of the call to its first content."""
     status_code: int | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
@@ -327,6 +330,9 @@ class Router:
             except BaseException:
                 await stream.aclose()
                 raise
+            # A stream that ended without content (an empty answer) has no first content.
+            sent_content = bool(read_so_far) and read_so_far[-1].has_content
+            first_token_ms = call.elapsed_ms() if sent_content else None
             await self._gate.record_commit(call.target, call.reservation)
 
             async def on_end() -> None:
@@ -336,6 +342,7 @@ class Router:
                         call.target,
                         Outcome.SUCCESS,
                         latency_ms=call.elapsed_ms(),
+                        first_token_ms=first_token_ms,
                         status_code=HTTPStatus.OK,
                         estimated_tokens=call.reservation.tokens,
                         degraded=call.reservation.degraded,
@@ -349,6 +356,7 @@ class Router:
                         call.target,
                         Outcome.INTERRUPTED,
                         latency_ms=call.elapsed_ms(),
+                        first_token_ms=first_token_ms,
                         # The client did receive a 200 before the stream broke.
                         status_code=HTTPStatus.OK,
                         error_message=reason,
