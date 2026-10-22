@@ -56,11 +56,13 @@ def get_authenticator(request: Request) -> Authenticator:
 
 
 async def authenticate(
+    request: Request,
     authenticator: Annotated[Authenticator, Depends(get_authenticator)],
     authorization: Annotated[str | None, Header()] = None,
 ) -> KeyOwner:
     """Check the gateway API key of the request (`Authorization: Bearer <key>`)."""
-    return await authenticator.authenticate(authorization)
+    client_ip = request.client.host if request.client else "unknown address"
+    return await authenticator.authenticate(authorization, client_ip)
 
 
 def get_usage_log(request: Request) -> UsageLog:

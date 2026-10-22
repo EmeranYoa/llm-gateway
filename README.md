@@ -135,7 +135,9 @@ Errors always use the OpenAI format (`{"error": {"message", "type", "param", "co
 | `REDIS_URL` | `redis://localhost:6379/0` | Set by Docker Compose. |
 | `REDIS_TIMEOUT` | `0.25` | Seconds to wait for Redis before routing without it (degraded mode). |
 | `DATABASE_URL` | `postgresql+asyncpg://gateway:gateway@localhost:5432/gateway` | Set by Docker Compose. |
-| `DATABASE_TIMEOUT` | `5` | Seconds after which a usage log write gives up. |
+| `DATABASE_TIMEOUT` | `5` | Seconds after which a usage log write or an API key check gives up. |
+| `AUTH_CACHE_TTL` | `60` | Seconds a verified API key is trusted without a new database check. A revoked key or new tenant limits take effect within that time. |
+| `AUTH_GRACE_PERIOD` | `900` | Seconds a verified API key keeps working while PostgreSQL is unavailable. Other keys get `503 authentication_unavailable`. |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `gateway` | Credentials of the PostgreSQL started by Docker Compose. |
 
 ### `config/gateway.yaml`

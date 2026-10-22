@@ -53,7 +53,11 @@ class ApiKeyRow(Base):
 
 @dataclass(frozen=True)
 class KeyOwner:
-    """Who a valid API key belongs to."""
+    """Who a valid API key belongs to, with the tenant's limits.
+
+    Each gateway instance caches it for `AUTH_CACHE_TTL` seconds, so a revoked key
+    or a limit changed by the admin CLI takes effect within that time.
+    """
 
     api_key_id: int
     tenant_id: int
@@ -105,7 +109,7 @@ async def create_api_key(
 async def set_tenant_limits(engine: AsyncEngine, tenant_name: str, *, rpm: int) -> bool:
     """Set the tenant's own requests-per-minute limit. Returns False for an unknown tenant.
 
-    Gateways see the new limit when they next check the tenant's keys in the database.
+    Gateways see the new limit when their key cache expires (`AUTH_CACHE_TTL`).
     """
     statement = (
         update(TenantRow)
@@ -160,7 +164,7 @@ class Revocation(Enum):
 
 
 async def revoke_api_key(engine: AsyncEngine, api_key_id: int) -> Revocation:
-    """Revoke a key: requests that use it are refused from now on.
+    """Revoke a key: requests that use it are refused once gateways' key caches expire.
 
     An already revoked key keeps its first revocation date.
     """
@@ -180,13 +184,23 @@ async def revoke_api_key(engine: AsyncEngine, api_key_id: int) -> Revocation:
 
 
 async def find_key_owner(engine: AsyncEngine, key: str) -> KeyOwner | None:
-    """Return who owns `key`, or None when the key is unknown or revoked."""
+    """Return who owns `key`, or None when the key is unknown or revoked.
+
+    A valid key is also marked as used now (`last_used_at`), in the same query.
+    The gateway calls this only when its verification cache is out of date, so
+    `last_used_at` is written about once per cache TTL, not on every request.
+    """
     query = (
-        select(ApiKeyRow.id, TenantRow.id, TenantRow.name, TenantRow.rpm)
-        .join(TenantRow, ApiKeyRow.tenant_id == TenantRow.id)
-        .where(ApiKeyRow.key_hash == hash_key(key), ApiKeyRow.revoked_at.is_(None))
+        update(ApiKeyRow)
+        .where(
+            ApiKeyRow.tenant_id == TenantRow.id,
+            ApiKeyRow.key_hash == hash_key(key),
+            ApiKeyRow.revoked_at.is_(None),
+        )
+        .values(last_used_at=dt.datetime.now(dt.UTC))
+        .returning(ApiKeyRow.id, TenantRow.id, TenantRow.name, TenantRow.rpm)
     )
-    async with engine.connect() as connection:
+    async with engine.begin() as connection:
         row = (await connection.execute(query)).first()
     if row is None:
         return None

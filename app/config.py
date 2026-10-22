@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     # Seconds to wait for Redis before routing without it (degraded mode, ADR 0002).
     redis_timeout: float = Field(default=0.25, gt=0)
+    # Seconds a verified API key is trusted without a new database check. A revoked
+    # key or a new tenant limit takes effect within that time (ADR 0004).
+    auth_cache_ttl: float = Field(default=60.0, gt=0)
+    # Seconds a verified API key keeps working while PostgreSQL is unavailable. A key
+    # not verified within that time is refused until the database is back (ADR 0004).
+    auth_grace_period: float = Field(default=900.0, gt=0)
 
 
 # --- File format (what `gateway.yaml` looks like) ---

@@ -14,10 +14,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings
-from tests.conftest import FetchUsageRows
+from tests.conftest import DatabaseProxy, FetchUsageRows, gateway_client
 from tests.upstream import (
+    CHAT_CONFIG,
     CHAT_REQUEST,
     GEMINI_URL,
+    GROQ_KEY,
     GROQ_URL,
     OLLAMA_URL,
     completion_body,
@@ -251,6 +253,34 @@ async def test_prompt_is_never_stored(
     [row] = await usage_rows()
     assert row["prompt_chars"] == len("user") + len(prompt)
     assert not any(prompt in str(value) for value in row.values())
+
+
+async def test_usage_log_write_gives_up_when_postgresql_does_not_answer(
+    write_config: WriteConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+    caplog: pytest.LogCaptureFixture,
+    database_proxy: DatabaseProxy,
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", GROQ_KEY)
+    respx_mock.post(GROQ_URL).respond(json=completion_body("llama-3.3-70b-versatile"))
+    settings = write_config(CHAT_CONFIG).model_copy(
+        update={"database_url": database_proxy.url, "database_timeout": 0.5}
+    )
+
+    async with gateway_client(settings) as client:
+        # A first request verifies the key while PostgreSQL answers.
+        assert (await client.post("/v1/chat/completions", json=CHAT_REQUEST)).status_code == 200
+        database_proxy.hang()
+        with caplog.at_level(logging.ERROR):
+            async with asyncio.timeout(3):
+                # The key is still in the verification cache: no database query is needed.
+                # The background write runs before the in-process client returns.
+                response = await client.post("/v1/chat/completions", json=CHAT_REQUEST)
+
+    assert response.status_code == 200
+    request_id = response.headers["X-Gateway-Request-Id"]
+    assert f"could not write the usage log of request {request_id}" in caplog.messages
 
 
 async def test_client_gets_its_response_when_the_usage_log_write_fails(

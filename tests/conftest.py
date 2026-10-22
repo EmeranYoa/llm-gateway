@@ -16,7 +16,7 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis
-from sqlalchemy import text
+from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings
@@ -199,6 +199,80 @@ async def silent_server() -> AsyncIterator[int]:
         writer.close()
     server.close()
     await server.wait_closed()
+
+
+class DatabaseProxy:
+    """A TCP proxy in front of the test PostgreSQL, to simulate an outage mid-test.
+
+    The gateway connects through `url`. Until an outage starts, bytes flow both ways.
+    `hang()` makes PostgreSQL look stuck: connections stay open but nothing comes back.
+    `stop()` makes it look down: connections are closed and new ones refused.
+    Stopping the shared test container instead would break other tests.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        self._target = make_url(database_url)
+        self._server: asyncio.Server | None = None
+        self._hanging = False
+        self._writers: list[asyncio.StreamWriter] = []
+        self._pumps: set[asyncio.Task[None]] = set()
+        self.url = ""
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(self._accept, "127.0.0.1", 0)
+        port = self._server.sockets[0].getsockname()[1]
+        self.url = self._target.set(host="127.0.0.1", port=port).render_as_string(
+            hide_password=False
+        )
+
+    def hang(self) -> None:
+        """From now on, drop every byte: queries and connection attempts never get an answer."""
+        self._hanging = True
+
+    async def stop(self) -> None:
+        """Close every connection and stop listening: new connections are refused."""
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+        for pump in self._pumps:
+            pump.cancel()
+        await asyncio.gather(*self._pumps, return_exceptions=True)
+        for writer in self._writers:
+            writer.close()
+        self._writers.clear()
+
+    async def _accept(
+        self, client_reader: asyncio.StreamReader, client: asyncio.StreamWriter
+    ) -> None:
+        self._writers.append(client)
+        if self._hanging:
+            return
+        server_reader, server = await asyncio.open_connection(self._target.host, self._target.port)
+        self._writers.append(server)
+        for source, destination in ((client_reader, server), (server_reader, client)):
+            pump = asyncio.create_task(self._pump(source, destination))
+            self._pumps.add(pump)
+            pump.add_done_callback(self._pumps.discard)
+
+    async def _pump(self, source: asyncio.StreamReader, destination: asyncio.StreamWriter) -> None:
+        try:
+            while data := await source.read(65536):
+                if not self._hanging:
+                    destination.write(data)
+                    await destination.drain()
+        except ConnectionError:
+            pass
+        finally:
+            destination.close()
+
+
+@pytest.fixture
+async def database_proxy(database_url: str) -> AsyncIterator[DatabaseProxy]:
+    """A proxy to the test PostgreSQL that a test can switch to "stuck" or "down"."""
+    proxy = DatabaseProxy(database_url)
+    await proxy.start()
+    yield proxy
+    await proxy.stop()
 
 
 # --- Admin CLI, run as an operator would: a real subprocess ---

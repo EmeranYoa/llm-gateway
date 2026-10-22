@@ -82,7 +82,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         default_completion_tokens=config.default_completion_tokens,
     )
     app.state.usage_log = UsageLog(database_engine)
-    app.state.authenticator = Authenticator(database_engine)
+    app.state.authenticator = Authenticator(
+        database_engine,
+        cache_ttl=settings.auth_cache_ttl,
+        grace_period=settings.auth_grace_period,
+    )
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(InvalidApiKey, invalid_api_key_handler)
     app.add_exception_handler(AuthenticationUnavailable, authentication_unavailable_handler)
