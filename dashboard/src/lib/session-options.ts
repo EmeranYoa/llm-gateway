@@ -5,18 +5,19 @@ import type { SessionOptions } from "iron-session";
 import { checkSessionSecret } from "./config";
 
 /**
- * How the session cookie is built. The cookie holds the admin key, encrypted
- * and signed by iron-session with DASHBOARD_SESSION_SECRET.
+ * How the session cookie is built. The cookie holds the session token of the
+ * admin API, encrypted and signed by iron-session with DASHBOARD_SESSION_SECRET.
  */
 
 export const SESSION_COOKIE_NAME = "gateway_dashboard_session";
 
-/** An operator signs in again after 8 hours. */
+/** An operator signs in again after 8 hours, like the session of the admin API. */
 export const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
 
 /** What the session cookie holds. Only the Next.js server can read it. */
 export type SessionData = {
-  adminKey: string;
+  /** The session token returned by the admin API at sign-in or setup. */
+  token: string;
 };
 
 /** Build the iron-session options. Throws when the secret is missing or too short. */

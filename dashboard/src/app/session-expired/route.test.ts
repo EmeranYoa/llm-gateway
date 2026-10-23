@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GET } from "./route";
 
 const session = vi.hoisted(() => ({
-  adminKey: "gwa_revoked_key" as string | undefined,
+  token: "gws_ended_session" as string | undefined,
   destroy: vi.fn(),
 }));
 

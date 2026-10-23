@@ -10,7 +10,7 @@ import {
 } from "./key-actions";
 
 const session = vi.hoisted(() => ({
-  adminKey: undefined as string | undefined,
+  token: undefined as string | undefined,
   save: vi.fn(async () => {}),
   destroy: vi.fn(),
 }));
@@ -25,7 +25,7 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 
-const ADMIN_KEY = "gwa_admin_key";
+const SESSION_TOKEN = "gws_session_token";
 const API = "http://admin-api.test:8001";
 const FULL_KEY = "gw_" + "k".repeat(43);
 const IDLE = { status: "idle" } as const;
@@ -76,7 +76,7 @@ function formOf(fields: Record<string, string>): FormData {
 beforeEach(() => {
   vi.stubEnv("ADMIN_API_URL", API);
   vi.stubEnv("DASHBOARD_SESSION_SECRET", "x".repeat(32));
-  session.adminKey = ADMIN_KEY;
+  session.token = SESSION_TOKEN;
   session.save.mockClear();
   session.destroy.mockClear();
   vi.mocked(revalidatePath).mockClear();
@@ -97,7 +97,7 @@ describe("createKeyAction", () => {
       url: `${API}/admin/v1/keys`,
       method: "POST",
       body: { tenant: "acme", rpm: 30 },
-      authorization: `Bearer ${ADMIN_KEY}`,
+      authorization: `Bearer ${SESSION_TOKEN}`,
     });
     expect(state).toEqual({ status: "created", key: created });
     expect(revalidatePath).toHaveBeenCalledWith("/keys");
@@ -147,14 +147,24 @@ describe("createKeyAction", () => {
     });
   });
 
-  it("ends the session when the admin API refuses the admin key", async () => {
+  it("ends the session when the admin API refuses the session", async () => {
     stubAdminApi(
-      apiError(401, "Missing or invalid API key.", "invalid_api_key"),
+      apiError(401, "Missing, invalid or expired session.", "invalid_session"),
     );
 
     await expect(
       createKeyAction(IDLE, formOf({ tenant: "acme" })),
     ).rejects.toThrow("redirect:/session-expired");
+  });
+
+  it("opens the password change page when the password must be changed", async () => {
+    stubAdminApi(
+      apiError(403, "Change your password first.", "password_change_required"),
+    );
+
+    await expect(
+      createKeyAction(IDLE, formOf({ tenant: "acme" })),
+    ).rejects.toThrow("redirect:/change-password");
   });
 });
 

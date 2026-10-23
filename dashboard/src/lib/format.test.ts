@@ -11,6 +11,7 @@ import {
   formatQuota,
   formatRate,
   formatSimilarity,
+  formatWait,
   noValue,
 } from "./format";
 
@@ -96,6 +97,20 @@ describe("formatCount", () => {
     expect(formatCount("en", 1234567)).toBe("1,234,567");
     expect(formatCount("fr", 1234567)).toBe(`1${NNBSP}234${NNBSP}567`);
     expect(formatCount("fr", 1250.5)).toBe(`1${NNBSP}250,5`);
+  });
+});
+
+describe("formatWait", () => {
+  it("rounds up to whole seconds below one minute", () => {
+    expect(formatWait("en", 41.2)).toBe("42 s");
+    expect(formatWait("en", 0)).toBe("1 s");
+    expect(formatWait("fr", 42)).toBe(`42${NBSP}s`);
+  });
+
+  it("uses minutes from one minute", () => {
+    expect(formatWait("en", 900)).toBe("15 min");
+    expect(formatWait("en", 125)).toBe("2 min 5 s");
+    expect(formatWait("fr", 900)).toBe(`15${NBSP}min`);
   });
 });
 

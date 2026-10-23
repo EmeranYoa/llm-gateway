@@ -1,8 +1,9 @@
 import Link from "next/link";
 
-import { logout } from "@/lib/auth-actions";
+import { signOutAction } from "@/lib/auth-actions";
 import type { Locale } from "@/lib/i18n/locale";
 import { getTranslator } from "@/lib/i18n/translator";
+import { saveLanguageAction } from "@/lib/language-actions";
 
 import { LanguageSelector } from "./language-selector";
 
@@ -37,8 +38,8 @@ export function NavBar({ locale }: { locale: Locale }) {
           ))}
         </ul>
         <div className="ml-auto flex items-center gap-4">
-          <LanguageSelector />
-          <form action={logout}>
+          <LanguageSelector save={saveLanguageAction} />
+          <form action={signOutAction}>
             <button
               type="submit"
               className="rounded border border-slate-300 px-3 py-1 text-sm hover:bg-slate-100"

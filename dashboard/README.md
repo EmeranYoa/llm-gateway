@@ -6,16 +6,34 @@ Redis itself.
 
 ## How sign-in works
 
-- The operator signs in on `/login` with an admin key (`gwa_...`, created with
-  `python -m app.admin create-admin-key --name <you>`).
-- A server action checks the key with `GET {ADMIN_API_URL}/admin/v1/me`. When the
-  admin API accepts it, the key is stored in an encrypted session cookie
-  (iron-session): `HttpOnly`, `Secure`, `SameSite=Strict`, 8 hours.
+- **First account** (`/setup`): while no operator account exists, the sign-in
+  page opens the setup screen. It asks for the one-time setup token printed in
+  the admin API logs (`docker compose logs admin-api`), a username and a
+  password typed twice (at least 12 characters).
+- **Sign-in** (`/login`): username and password. A server action sends them to
+  `POST {ADMIN_API_URL}/admin/v1/sessions` and stores the session token it gets
+  back in an encrypted session cookie (iron-session): `HttpOnly`, `Secure`,
+  `SameSite=Strict`, 8 hours. Errors are translated from their code (wrong
+  credentials, too many attempts with the wait time of `Retry-After`, admin API
+  unavailable or unreachable).
 - Pages call the admin API from the Next.js server (`src/api/client.ts`), with the
-  key read from the session. The browser never receives the key: it only holds
-  the encrypted cookie, which JavaScript cannot read.
+  token read from the session. The browser never receives a password or a token:
+  it only holds the encrypted cookie, which JavaScript cannot read. Forms post
+  through server actions only, never in a URL.
 - `src/proxy.ts` sends visitors without a session to `/login`. When the admin API
-  answers 401 (revoked key), the session is ended and the operator signs in again.
+  answers 401 (session expired, signed out, account disabled), the session is
+  ended and the operator signs in again.
+- **Forced password change** (`/change-password`): the protected layout reads
+  the account once per request (`GET /admin/v1/me`, `lib/account.ts`). While
+  `must_change_password` is set, every screen sends there; a 403
+  `password_change_required` from any call does the same.
+- **Sign-out** calls `DELETE /admin/v1/sessions/current` (a failure is
+  ignored), then destroys the cookie.
+- **Recovery** (`/recovery`): when the admin API runs with
+  `OPERATOR_RECOVERY=true`, the sign-in page links to this screen: recovery
+  token (from the admin API logs), username and new password. The operator then
+  signs in with it and must change it. While recovery is on, a banner on every
+  page asks to remove `OPERATOR_RECOVERY` and restart the admin API.
 - Server actions only run when the `Origin` of the request matches the host of the
   dashboard (Next.js check, `allowedOrigins` is empty in `next.config.ts`). Behind
   a reverse proxy, forward `X-Forwarded-Host`, or add the public host there.
@@ -77,9 +95,12 @@ The dashboard speaks English and French. There is no i18n library:
   `const { locale, t } = await getI18n()` (`lib/i18n/server.ts`) and pass
   `locale` to their components; client components call `useTranslator()` and
   `useLocale()` (`lib/i18n/client.tsx`).
-- The language is, in order: the `lang` cookie written by the selector of the
-  nav bar (one year), the browser's `Accept-Language` header, English
-  (`resolveLocale` in `lib/i18n/locale.ts`).
+- The language is, in order: the language saved in the signed-in operator's
+  account, the `lang` cookie written by the language selector (one year), the
+  browser's `Accept-Language` header, English (`resolveLocale` in
+  `lib/i18n/locale.ts`). When signed in, the selector saves the choice in the
+  account (`PUT /admin/v1/me/language`) and in the cookie, so the sign-in page
+  keeps it after sign-out; signed out, it only writes the cookie.
 - Errors of the admin API are translated from their `code`
   (`lib/i18n/api-errors.ts`); an unknown code shows a generic message and the
   English detail of the admin API.

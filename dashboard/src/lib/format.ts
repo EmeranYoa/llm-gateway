@@ -133,6 +133,23 @@ export function formatDuration(
     : t("format.minutesSeconds", { minutes, seconds: rest });
 }
 
+/**
+ * A time to wait, in whole seconds rounded up: `42 s`, `15 min`, `2 min 5 s`.
+ * For a `Retry-After` of the admin API.
+ */
+export function formatWait(locale: Locale, seconds: number): string {
+  const t = getTranslator(locale);
+  const whole = Math.max(1, Math.ceil(seconds));
+  if (whole < 60) {
+    return t("format.seconds", { value: whole });
+  }
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  return rest === 0
+    ? t("format.minutes", { value: minutes })
+    : t("format.minutesSeconds", { minutes, seconds: rest });
+}
+
 /** How long ago something happened, from a number of seconds: `5 s ago`, `2 min ago`. */
 export function formatAge(locale: Locale, seconds: number): string {
   const t = getTranslator(locale);

@@ -38,7 +38,7 @@ describe("proxy", () => {
 
   it("lets a signed-in operator through", async () => {
     const sealed = await sealData(
-      { adminKey: "gwa_key" },
+      { token: "gws_session_token" },
       { password: SECRET },
     );
 

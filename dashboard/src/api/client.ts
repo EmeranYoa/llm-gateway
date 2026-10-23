@@ -13,8 +13,9 @@ import type { components, paths } from "./schema";
 /**
  * Client of the admin API, used only by the Next.js server.
  *
- * The admin key lives in the encrypted session cookie. This module reads it on
- * the server and sends it to the admin API: the browser never sees it.
+ * The session token of the admin API lives in the encrypted session cookie.
+ * This module reads it on the server and sends it to the admin API: the
+ * browser never sees it.
  */
 
 export type Me =
@@ -32,13 +33,19 @@ export type RequestSummary = components["schemas"]["RequestSummary"];
 export type RequestDetail = components["schemas"]["RequestDetail"];
 export type RoutingStep = components["schemas"]["RoutingStep"];
 
-/** Where to send the operator when the admin API refuses the key of the session. */
+/** Where to send the operator when the admin API refuses the session token. */
 export const SESSION_EXPIRED_PATH = "/session-expired";
+
+/** Where to send the operator who must choose a new password first. */
+export const CHANGE_PASSWORD_PATH = "/change-password";
+
+/** The error code of the admin API while the operator must change their password. */
+export const PASSWORD_CHANGE_REQUIRED = "password_change_required";
 
 /** Seconds to wait for the admin API before showing an error. */
 const REQUEST_TIMEOUT_MS = 10_000;
 
-/** The admin API failed, or answered with an error other than 401. */
+/** The admin API failed, or answered with an error. */
 export class AdminApiError extends Error {
   override name = "AdminApiError";
 
@@ -48,6 +55,8 @@ export class AdminApiError extends Error {
     readonly status: number | null,
     /** The `code` of the OpenAI-format error body, when there is one. */
     readonly code: string | null,
+    /** Seconds to wait before trying again (`Retry-After`), when the answer says. */
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
   }
@@ -65,7 +74,7 @@ export function keepApiError(caught: unknown): AdminApiError {
   throw caught;
 }
 
-/** Return the operator who owns the admin key of the session. */
+/** Return the operator signed in with the session. */
 export async function getMe(): Promise<Me> {
   return callWithSession<Me>("/admin/v1/me");
 }
@@ -137,57 +146,78 @@ export async function getRequest(requestId: string): Promise<RequestDetail> {
   );
 }
 
-/**
- * Check an admin key typed on the sign-in page, before it goes in the session.
- *
- * Returns the operator, or null when the admin API refuses the key.
- */
-export async function checkAdminKey(adminKey: string): Promise<Me | null> {
-  const response = await callAdminApi("/admin/v1/me", adminKey);
-  if (response.status === 401) {
-    return null;
-  }
-  return readBody<Me>(response);
-}
-
 /** A write to the admin API: the HTTP method and the JSON body, if any. */
 export type AdminApiWrite = {
-  method: "POST" | "PUT";
+  method: "POST" | "PUT" | "DELETE";
   body?: unknown;
 };
 
 /**
- * Call the admin API with the admin key of the session and return the JSON answer.
+ * Call the admin API with the session token of the cookie and return the JSON
+ * answer (`undefined` for a 204).
  *
- * Without a session, sends to the sign-in page; on a 401, ends the session.
- * Any other error is raised as an `AdminApiError`.
+ * Without a session, sends to the sign-in page; on a 401, ends the session; on
+ * a 403 `password_change_required`, sends to the password change page. Any
+ * other error is raised as an `AdminApiError`.
  */
 export async function callWithSession<T>(
   path: string,
   write?: AdminApiWrite,
 ): Promise<T> {
-  const { adminKey } = await getSession();
-  if (!adminKey) {
+  const { token } = await getSession();
+  if (!token) {
     redirect("/login");
   }
-  const response = await callAdminApi(path, adminKey, write);
-  if (response.status === 401) {
-    // The key was revoked, or expired from the admin API's point of view.
-    redirect(SESSION_EXPIRED_PATH);
+  try {
+    return await callWithToken<T>(path, token, write);
+  } catch (error) {
+    if (error instanceof AdminApiError) {
+      if (error.status === 401) {
+        // The session ended on the admin API: expired, signed out, or disabled account.
+        redirect(SESSION_EXPIRED_PATH);
+      }
+      if (error.code === PASSWORD_CHANGE_REQUIRED) {
+        redirect(CHANGE_PASSWORD_PATH);
+      }
+    }
+    throw error;
   }
-  return readBody<T>(response);
+}
+
+/**
+ * Call the admin API with an explicit session token. Every error, a 401
+ * included, is raised as an `AdminApiError`: nothing redirects.
+ */
+export async function callWithToken<T>(
+  path: string,
+  token: string,
+  write?: AdminApiWrite,
+): Promise<T> {
+  return readBody<T>(await callAdminApi(path, token, write));
+}
+
+/**
+ * Call a route of the admin API that needs no session: the setup of the first
+ * account, the sign-in and the account recovery. Errors are raised as an
+ * `AdminApiError`.
+ */
+export async function callWithoutSession<T>(
+  path: string,
+  write?: AdminApiWrite,
+): Promise<T> {
+  return readBody<T>(await callAdminApi(path, null, write));
 }
 
 async function callAdminApi(
   path: string,
-  adminKey: string,
+  token: string | null,
   write?: AdminApiWrite,
 ): Promise<Response> {
   const { adminApiUrl } = readDashboardConfig();
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${adminKey}`,
-    Accept: "application/json",
-  };
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token !== null) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   if (write?.body !== undefined) {
     headers["Content-Type"] = "application/json";
   }
@@ -212,6 +242,9 @@ async function readBody<T>(response: Response): Promise<T> {
   if (!response.ok) {
     throw await toAdminApiError(response);
   }
+  if (response.status === 204) {
+    return undefined as T;
+  }
   return (await response.json()) as T;
 }
 
@@ -232,5 +265,36 @@ async function toAdminApiError(response: Response): Promise<AdminApiError> {
       ? body.error.message
       : `The admin API answered with HTTP ${response.status}.`;
   const code = typeof body.error?.code === "string" ? body.error.code : null;
-  return new AdminApiError(message, response.status, code);
+  return new AdminApiError(
+    message,
+    response.status,
+    code,
+    parseRetryAfter(response.headers.get("retry-after")),
+  );
+}
+
+/**
+ * Seconds to wait from a `Retry-After` header: a number of seconds, or an HTTP
+ * date. Null when the header is missing or invalid.
+ */
+export function parseRetryAfter(
+  value: string | null,
+  now: number = Date.now(),
+): number | null {
+  if (value === null || value.trim() === "") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+  // An HTTP date starts with the name of a day ("Fri, 23 Oct 2026 ...").
+  if (!/^[A-Za-z]/.test(trimmed)) {
+    return null;
+  }
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date)) {
+    return null;
+  }
+  return Math.max(0, Math.ceil((date - now) / 1000));
 }

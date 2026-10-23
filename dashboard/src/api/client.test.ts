@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   AdminApiError,
-  checkAdminKey,
+  callWithoutSession,
+  callWithSession,
   getMe,
   getOverview,
   getRequest,
@@ -11,10 +12,11 @@ import {
   listTenantNames,
   keepApiError,
   listRequests,
+  parseRetryAfter,
 } from "./client";
 
 const session = vi.hoisted(() => ({
-  adminKey: undefined as string | undefined,
+  token: undefined as string | undefined,
   save: vi.fn(),
   destroy: vi.fn(),
 }));
@@ -27,7 +29,7 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
-const ADMIN_KEY = "gwa_test_key";
+const SESSION_TOKEN = "gws_test_session";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -48,11 +50,11 @@ function stubFetch(response: Response | Error) {
 beforeEach(() => {
   vi.stubEnv("ADMIN_API_URL", "http://admin-api.test:8001");
   vi.stubEnv("DASHBOARD_SESSION_SECRET", "x".repeat(32));
-  session.adminKey = ADMIN_KEY;
+  session.token = SESSION_TOKEN;
 });
 
 describe("getMe", () => {
-  it("sends the admin key of the session to the admin API", async () => {
+  it("sends the session token to the admin API", async () => {
     const fetchMock = stubFetch(jsonResponse(200, { name: "alice" }));
 
     await expect(getMe()).resolves.toEqual({ name: "alice" });
@@ -64,26 +66,26 @@ describe("getMe", () => {
     ];
     expect(url).toBe("http://admin-api.test:8001/admin/v1/me");
     expect(new Headers(init.headers).get("Authorization")).toBe(
-      `Bearer ${ADMIN_KEY}`,
+      `Bearer ${SESSION_TOKEN}`,
     );
   });
 
-  it("sends to the sign-in page when the session has no key", async () => {
-    session.adminKey = undefined;
+  it("sends to the sign-in page without a session", async () => {
+    session.token = undefined;
     const fetchMock = stubFetch(jsonResponse(200, { name: "alice" }));
 
     await expect(getMe()).rejects.toThrow("redirect:/login");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("ends the session when the admin API refuses the key", async () => {
+  it("ends the session when the admin API refuses it", async () => {
     stubFetch(
       jsonResponse(401, {
         error: {
-          message: "Missing or invalid API key.",
+          message: "Missing, invalid or expired session. Sign in again.",
           type: "invalid_request_error",
           param: null,
-          code: "invalid_api_key",
+          code: "invalid_session",
         },
       }),
     );
@@ -137,35 +139,109 @@ describe("getMe", () => {
   });
 });
 
-describe("checkAdminKey", () => {
-  it("returns the operator when the key is valid", async () => {
-    const fetchMock = stubFetch(jsonResponse(200, { name: "alice" }));
+describe("callWithSession", () => {
+  it("opens the password change page while the password must be changed", async () => {
+    stubFetch(
+      jsonResponse(403, {
+        error: {
+          message: "Change your password first.",
+          code: "password_change_required",
+        },
+      }),
+    );
 
-    await expect(checkAdminKey("gwa_other")).resolves.toEqual({
-      name: "alice",
+    await expect(callWithSession("/admin/v1/overview")).rejects.toThrow(
+      "redirect:/change-password",
+    );
+    expect(session.destroy).not.toHaveBeenCalled();
+  });
+
+  it("raises any other 403 as a typed error", async () => {
+    stubFetch(
+      jsonResponse(403, {
+        error: { message: "Wrong password.", code: "reauthentication_failed" },
+      }),
+    );
+
+    await expect(
+      callWithSession("/admin/v1/me/password", { method: "PUT", body: {} }),
+    ).rejects.toMatchObject({ status: 403, code: "reauthentication_failed" });
+  });
+
+  it("returns undefined for an answer without a body (204)", async () => {
+    const fetchMock = stubFetch(new Response(null, { status: 204 }));
+
+    await expect(
+      callWithSession("/admin/v1/sessions/current", { method: "DELETE" }),
+    ).resolves.toBeUndefined();
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(init.method).toBe("DELETE");
+  });
+});
+
+describe("callWithoutSession", () => {
+  it("sends no Authorization header and keeps the wait time of a 429", async () => {
+    const fetchMock = stubFetch(
+      new Response(
+        JSON.stringify({
+          error: { message: "Too many attempts.", code: "too_many_attempts" },
+        }),
+        { status: 429, headers: { "retry-after": "42" } },
+      ),
+    );
+
+    const error = await callWithoutSession("/admin/v1/sessions", {
+      method: "POST",
+      body: { username: "alice", password: "x" },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      status: 429,
+      code: "too_many_attempts",
+      retryAfterSeconds: 42,
     });
     const [, init] = fetchMock.mock.calls[0] as unknown as [
       string,
       RequestInit,
     ];
-    expect(new Headers(init.headers).get("Authorization")).toBe(
-      "Bearer gwa_other",
-    );
-  });
-
-  it("returns null when the key is refused, without touching the session", async () => {
-    stubFetch(jsonResponse(401, { error: { message: "no" } }));
-
-    await expect(checkAdminKey("gwa_wrong")).resolves.toBeNull();
+    expect(new Headers(init.headers).get("Authorization")).toBeNull();
     expect(session.destroy).not.toHaveBeenCalled();
   });
 
-  it("raises a typed error for other failures", async () => {
-    stubFetch(jsonResponse(500, { error: { message: "boom" } }));
-
-    await expect(checkAdminKey("gwa_other")).rejects.toBeInstanceOf(
-      AdminApiError,
+  it("never redirects on a 401", async () => {
+    stubFetch(
+      jsonResponse(401, {
+        error: { message: "Wrong.", code: "invalid_credentials" },
+      }),
     );
+
+    await expect(
+      callWithoutSession("/admin/v1/sessions", { method: "POST", body: {} }),
+    ).rejects.toMatchObject({ status: 401, code: "invalid_credentials" });
+  });
+});
+
+describe("parseRetryAfter", () => {
+  it("reads seconds", () => {
+    expect(parseRetryAfter("120")).toBe(120);
+    expect(parseRetryAfter(" 0 ")).toBe(0);
+  });
+
+  it("reads an HTTP date", () => {
+    const now = Date.parse("2026-10-23T10:00:00Z");
+
+    expect(parseRetryAfter("Fri, 23 Oct 2026 10:01:30 GMT", now)).toBe(90);
+    expect(parseRetryAfter("Fri, 23 Oct 2026 09:00:00 GMT", now)).toBe(0);
+  });
+
+  it("gives null for a missing or invalid header", () => {
+    expect(parseRetryAfter(null)).toBeNull();
+    expect(parseRetryAfter("")).toBeNull();
+    expect(parseRetryAfter("soon")).toBeNull();
+    expect(parseRetryAfter("-5")).toBeNull();
   });
 });
 

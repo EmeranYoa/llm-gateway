@@ -3,7 +3,8 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/session";
 
 /**
- * End a session whose admin key the admin API refused (revoked key).
+ * End a session that the admin API refused (expired, signed out elsewhere, or
+ * disabled account).
  *
  * The API client sends the operator here on a 401: a page being rendered is not
  * allowed to change cookies, a route handler is. Calling it from another site

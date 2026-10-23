@@ -34,8 +34,8 @@ export function isLocale(value: unknown): value is Locale {
 /**
  * The language of a request, from the most to the least explicit choice:
  *
- * 1. the language saved in the operator's account (`accountLanguage`, not
- *    passed yet: the account API does not exist);
+ * 1. the language saved in the signed-in operator's account (`accountLanguage`,
+ *    from `GET /admin/v1/me`);
  * 2. the `lang` cookie written by the language selector;
  * 3. the browser's `Accept-Language` header;
  * 4. English.

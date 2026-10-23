@@ -7,7 +7,7 @@ import type { components } from "./schema";
  * Calls of the admin API behind the Keys screen: tenants, their keys and limits,
  * their cached answers, and the history of admin actions.
  *
- * Server only, like `client.ts`: the admin key of the session is added there.
+ * Server only, like `client.ts`: the session token is added there.
  */
 
 type Schemas = components["schemas"];
