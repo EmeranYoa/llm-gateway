@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     # Seconds a verified API key keeps working while PostgreSQL is unavailable. A key
     # not verified within that time is refused until the database is back (ADR 0004).
     auth_grace_period: float = Field(default=900.0, gt=0)
+    # Admin API only. When true, the admin API prints a one-time recovery token in
+    # its log at startup: with it, someone who can read the server log gives back
+    # access to an operator account (lost password, disabled or locked account).
+    # Turn it on for a recovery only, then off again (`app/admin_api/recovery.py`).
+    operator_recovery: bool = False
 
 
 # --- File format (what `gateway.yaml` looks like) ---

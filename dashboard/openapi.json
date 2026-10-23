@@ -10,6 +10,7 @@
           "clear-cache",
           "purge-usage-log",
           "create-operator",
+          "recover-operator",
           "create-admin-key",
           "revoke-admin-key"
         ],
@@ -814,6 +815,60 @@
           "limit"
         ],
         "title": "QuotaUsage",
+        "type": "object"
+      },
+      "RecoveredOperator": {
+        "description": "An operator account given back by recovery. It signs in normally, then must\nchoose a new password.",
+        "properties": {
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username"
+        ],
+        "title": "RecoveredOperator",
+        "type": "object"
+      },
+      "RecoveryRequest": {
+        "additionalProperties": false,
+        "description": "Give back access to an operator account with the recovery token printed in the log.",
+        "properties": {
+          "new_password": {
+            "title": "New Password",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "username",
+          "new_password"
+        ],
+        "title": "RecoveryRequest",
+        "type": "object"
+      },
+      "RecoveryStatus": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "RecoveryStatus",
         "type": "object"
       },
       "RequestDetail": {
@@ -2323,6 +2378,92 @@
           }
         },
         "summary": "Overview"
+      }
+    },
+    "/admin/v1/recovery": {
+      "get": {
+        "description": "Tell whether the recovery mode is on. No session needed.",
+        "operationId": "recovery_status_admin_v1_recovery_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Recovery Status"
+      },
+      "post": {
+        "description": "Set a new password for an operator account, and enable and unlock it.\n\nNo session needed: the recovery token is enough. Every session of the account\nends. No session is opened: the operator signs in with the new password, then\nmust choose another one.",
+        "operationId": "recover_admin_v1_recovery_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveredOperator"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Password refused"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Wrong recovery token"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Recovery mode off, token already used, or unknown username"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recover"
       }
     },
     "/admin/v1/requests": {

@@ -37,5 +37,19 @@ class SetupStatus(BaseModel):
     """True while no operator account exists: the first one can be created with the setup token."""
 
 
+class RecoveryStatus(BaseModel):
+    enabled: bool
+    """True while `OPERATOR_RECOVERY` is on, even after its token was used: it must be
+    turned off once done."""
+
+
+class RecoveredOperator(BaseModel):
+    """An operator account given back by recovery. It signs in normally, then must
+    choose a new password."""
+
+    username: str
+    """As typed when the account was created."""
+
+
 class Health(BaseModel):
     status: str

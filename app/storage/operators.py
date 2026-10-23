@@ -211,6 +211,42 @@ async def close_session(engine: AsyncEngine, session_id: int) -> None:
         )
 
 
+async def recover_operator(
+    engine: AsyncEngine, username: str, password_hash: str, *, actor: Actor
+) -> str | None:
+    """Give back access to the account named `username` (whatever the case): recovery mode.
+
+    In one transaction: set the new password, to be changed at the next sign-in,
+    enable the account, clear its failed sign-ins and its lock, end all its
+    sessions and record the action. Returns the username as stored, or None,
+    changing nothing, when there is no such account.
+    """
+    async with engine.begin() as connection:
+        row = (
+            await connection.execute(
+                update(OperatorRow)
+                .where(func.lower(OperatorRow.username) == func.lower(username))
+                .values(
+                    password_hash=password_hash,
+                    must_change_password=True,
+                    enabled=True,
+                    failed_attempts=0,
+                    locked_until=None,
+                )
+                .returning(OperatorRow.id, OperatorRow.username)
+            )
+        ).first()
+        if row is None:
+            return None
+        recovered_id, recovered_username = row
+        await connection.execute(
+            delete(OperatorSessionRow).where(OperatorSessionRow.operator_id == recovered_id)
+        )
+        # Never the password nor its hash: the username is enough to know who was recovered.
+        await record_action(connection, actor, Action.RECOVER_OPERATOR, recovered_username, {})
+        return str(recovered_username)
+
+
 async def _insert_operator(
     connection: AsyncConnection,
     username: str,

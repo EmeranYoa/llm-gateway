@@ -128,6 +128,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Recovery Status
+         * @description Tell whether the recovery mode is on. No session needed.
+         */
+        get: operations["recovery_status_admin_v1_recovery_get"];
+        put?: never;
+        /**
+         * Recover
+         * @description Set a new password for an operator account, and enable and unlock it.
+         *
+         *     No session needed: the recovery token is enough. Every session of the account
+         *     ends. No session is opened: the operator signs in with the new password, then
+         *     must choose another one.
+         */
+        post: operations["recover_admin_v1_recovery_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/requests": {
         parameters: {
             query?: never;
@@ -368,7 +396,7 @@ export interface components {
          * @description What an operator did.
          * @enum {string}
          */
-        Action: "create-key" | "revoke-key" | "set-limits" | "clear-cache" | "purge-usage-log" | "create-operator" | "create-admin-key" | "revoke-admin-key";
+        Action: "create-key" | "revoke-key" | "set-limits" | "clear-cache" | "purge-usage-log" | "create-operator" | "recover-operator" | "create-admin-key" | "revoke-admin-key";
         /**
          * AdminAction
          * @description A change made by an operator, with the admin API or the admin CLI.
@@ -721,6 +749,32 @@ export interface components {
              * @description Used in the current window. Only counted when the limit is set. Null when the live state is unknown.
              */
             used: number | null;
+        };
+        /**
+         * RecoveredOperator
+         * @description An operator account given back by recovery. It signs in normally, then must
+         *     choose a new password.
+         */
+        RecoveredOperator: {
+            /** Username */
+            username: string;
+        };
+        /**
+         * RecoveryRequest
+         * @description Give back access to an operator account with the recovery token printed in the log.
+         */
+        RecoveryRequest: {
+            /** New Password */
+            new_password: string;
+            /** Token */
+            token: string;
+            /** Username */
+            username: string;
+        };
+        /** RecoveryStatus */
+        RecoveryStatus: {
+            /** Enabled */
+            enabled: boolean;
         };
         /**
          * RequestDetail
@@ -1487,6 +1541,86 @@ export interface operations {
                 };
             };
             /** @description Unknown tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recovery_status_admin_v1_recovery_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryStatus"];
+                };
+            };
+        };
+    };
+    recover_admin_v1_recovery_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoveryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveredOperator"];
+                };
+            };
+            /** @description Password refused */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Wrong recovery token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Recovery mode off, token already used, or unknown username */
             404: {
                 headers: {
                     [name: string]: unknown;

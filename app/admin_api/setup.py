@@ -13,9 +13,7 @@ only one first account is ever created (`create_first_operator`).
 """
 
 import asyncio
-import hmac
 import logging
-import secrets
 from typing import cast
 
 from fastapi import APIRouter, Request
@@ -25,10 +23,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.admin_api.dependencies import Database
+from app.admin_api.one_time_tokens import OneTimeToken
 from app.admin_api.schemas import Session, SetupStatus
 from app.admin_api.sessions import Username
 from app.api.routes import error_response
-from app.auth.keys import hash_key
 from app.auth.passwords import hash_password, password_problem
 from app.schemas import ErrorBody
 from app.storage.admin_actions import SETUP
@@ -39,33 +37,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/v1")
 
 
-class SetupToken:
-    """The one-time setup token of this admin API instance. Only its hash is kept."""
-
-    def __init__(self) -> None:
-        self._hash: str | None = None
-
-    @property
-    def available(self) -> bool:
-        """True from its generation until the first account is created with it."""
-        return self._hash is not None
-
-    def generate(self) -> str:
-        """Generate a new token, replacing any previous one, and return it."""
-        token = secrets.token_urlsafe(32)
-        self._hash = hash_key(token)
-        return token
-
-    def matches(self, token: str) -> bool:
-        """Return True when `token` is the setup token. Constant-time comparison."""
-        return self._hash is not None and hmac.compare_digest(self._hash, hash_key(token))
-
-    def consume(self) -> None:
-        """Stop accepting the token: the first account exists."""
-        self._hash = None
-
-
-async def announce_setup_token(engine: AsyncEngine, setup_token: SetupToken) -> None:
+async def announce_setup_token(engine: AsyncEngine, setup_token: OneTimeToken) -> None:
     """At startup, generate and print a setup token when no operator account exists.
 
     When PostgreSQL is unavailable, the token is generated and printed anyway:
@@ -151,8 +123,8 @@ async def set_up(
     return Session(token=session.token, username=session.username, expires_at=session.expires_at)
 
 
-def _setup_token(request: Request) -> SetupToken:
-    return cast(SetupToken, request.app.state.setup_token)
+def _setup_token(request: Request) -> OneTimeToken:
+    return cast(OneTimeToken, request.app.state.setup_token)
 
 
 def _setup_closed() -> JSONResponse:
