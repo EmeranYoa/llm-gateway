@@ -17,7 +17,7 @@ from app.auth.authenticator import Authenticator
 from app.cache.eligibility import answer_can_be_stored, request_can_use_cache
 from app.cache.keys import RequestKey, request_key
 from app.cache.replay import replayed_chunks
-from app.cache.store import CachedAnswer, ResponseCache
+from app.cache.store import CachedAnswer, CacheLookup, ResponseCache
 from app.config import GatewayConfig, Target
 from app.routing.acquisition import (
     TargetGate,
@@ -162,6 +162,7 @@ async def chat_completions(
     gateway_router: Annotated[Router, Depends(get_router)],
     response_cache: Annotated[ResponseCache, Depends(get_response_cache)],
     usage_log: Annotated[UsageLog, Depends(get_usage_log)],
+    x_gateway_cache: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any] | Response:
     """Route an OpenAI chat completion request to a provider/model target.
 
@@ -175,7 +176,9 @@ async def chat_completions(
 
     On an alias that uses the response cache, an identical earlier request of the
     same tenant is answered from the cache, without calling any provider. Otherwise
-    the complete answer is stored after the response.
+    the complete answer is stored after the response. With the request header
+    `X-Gateway-Cache: bypass`, a provider is called and its answer replaces the
+    stored one.
     """
     request_id = uuid4().hex
     received_at = dt.datetime.now(dt.UTC)
@@ -210,8 +213,12 @@ async def chat_completions(
         attempts=attempts,
     )
     cache_key = _cache_key(response_cache, request)
+    bypass = cache_key is not None and (x_gateway_cache or "").strip().lower() == "bypass"
     cache_lookup = None
-    if cache_key is not None:
+    if bypass and cache_key is not None:
+        # The client wants a fresh answer: no lookup, but the vector is needed to store it.
+        cache_lookup = CacheLookup(None, await response_cache.vector_for(cache_key))
+    elif cache_key is not None:
         cache_lookup = await response_cache.lookup(owner.tenant_id, request.model, cache_key)
         if cache_lookup.answer is not None:
             # No provider is called: the tenant budget gets its reserved tokens back.
@@ -228,7 +235,7 @@ async def chat_completions(
         return Response(status_code=CLIENT_CLOSED_REQUEST)
     if not isinstance(result, CommittedStream):
         await _record_tenant_outcome(tenant_gate, admission, result, attempts)
-    cache_headers = {"X-Gateway-Cache": "miss"} if cache_key is not None else {}
+    cache_headers = {"X-Gateway-Cache": "bypass" if bypass else "miss"} if cache_key else {}
     if cache_key is not None:
         # Stored after the response: the client does not wait for the cache.
         vector = cache_lookup.vector if cache_lookup is not None else None
@@ -241,6 +248,7 @@ async def chat_completions(
                 result.body,
                 result.target,
                 vector,
+                replace=bypass,
             )
         elif isinstance(result, CommittedStream):
             background_tasks.add_task(
@@ -251,6 +259,7 @@ async def chat_completions(
                 request.model,
                 cache_key,
                 vector,
+                replace=bypass,
             )
     if isinstance(result, JSONResponse):
         result.headers.update(cache_headers)
@@ -321,13 +330,17 @@ async def _store_streamed_answer(
     alias: str,
     key: RequestKey,
     vector: list[float] | None,
+    *,
+    replace: bool,
 ) -> None:
     """Store the answer of a stream that ended complete.
 
     It runs after the stream: an interrupted or cancelled stream has no answer.
     """
     if stream.answer is not None and answer_can_be_stored(stream.answer):
-        await response_cache.store(tenant_id, alias, key, stream.answer, stream.target, vector)
+        await response_cache.store(
+            tenant_id, alias, key, stream.answer, stream.target, vector, replace=replace
+        )
 
 
 # Status for a request the client abandoned (a convention from nginx): never read.

@@ -196,6 +196,9 @@ class CacheSection(_FileModel):
     """Cosine similarity from which a rephrased question gets the stored answer."""
     max_semantic_chars: int = Field(default=2000, gt=0)
     """Longer questions only get exact hits: an embedding model silently cuts long texts."""
+    max_entries_per_tenant: int = Field(default=10000, gt=0)
+    """Above it, no new answer of the tenant is stored (lookups go on): Redis also holds
+    the quotas, so one tenant must not fill its memory."""
     aliases: dict[str, CachedAliasSection]
 
 
@@ -267,6 +270,8 @@ class GatewayConfig:
     """The aliases that use the response cache. Empty when there is no `cache` section."""
     cache_embedding: EmbeddingSettings | None
     """None when the cache only answers identical requests."""
+    cache_max_entries_per_tenant: int | None
+    """None when there is no `cache` section, so no cache at all."""
     routes: Mapping[str, tuple[Target, ...]]
     enabled_providers: tuple[str, ...]
     disabled_providers: tuple[str, ...]
@@ -293,6 +298,9 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
         tenant_default_limits=file_config.tenants.default_limits,
         cached_aliases=_resolve_cached_aliases(file_config.cache),
         cache_embedding=_resolve_cache_embedding(file_config.cache, providers),
+        cache_max_entries_per_tenant=(
+            file_config.cache.max_entries_per_tenant if file_config.cache is not None else None
+        ),
         routes=_resolve_routes(file_config, providers),
         enabled_providers=tuple(providers),
         disabled_providers=tuple(disabled),

@@ -6,6 +6,9 @@ lookups use Redis vector search: each entry may also hold the embedding of its
 question, and a `scope` tag (tenant, alias, context and embedding model) that
 limits the search to entries with the same context. Each entry expires after
 the TTL of its alias; a hit does not extend it.
+
+Writes go through one Lua script (`lua/store_entry.lua`): it keeps the first
+answer of identical concurrent requests and the entry limit of each tenant.
 """
 
 import hashlib
@@ -16,6 +19,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from redis.asyncio import Redis
@@ -58,12 +62,20 @@ class ResponseCache:
         redis: Redis,
         cached_aliases: Mapping[str, AliasCache],
         embedding: EmbeddingClient | None = None,
+        max_entries_per_tenant: int | None = None,
     ) -> None:
-        """Without `embedding`, the cache only answers identical requests."""
+        """Without `embedding`, the cache only answers identical requests.
+
+        Without `max_entries_per_tenant`, a tenant may store any number of answers.
+        """
         self._redis = redis
         self._cached_aliases = cached_aliases
         self._embedding = embedding
+        self._max_entries_per_tenant = max_entries_per_tenant
         self._created_indexes: set[str] = set()
+        self._store_script = redis.register_script(
+            (Path(__file__).parent / "lua" / "store_entry.lua").read_text(encoding="utf-8")
+        )
 
     def covers(self, alias: str) -> bool:
         """True when `alias` uses the cache."""
@@ -76,12 +88,23 @@ class ResponseCache:
         number of characters. Raises `EmbeddingUnavailable` when the embedding model fails.
         """
         answer = await self._read(_entry_key(tenant_id, alias, key), similarity=1.0)
-        if answer is not None or self._embedding is None or not self._embeds(key.question):
+        if answer is not None:
             return CacheLookup(answer, vector=None)
+        vector = await self.vector_for(key)
+        if vector is None:
+            return CacheLookup(None, vector=None)
+        return CacheLookup(await self._nearest(tenant_id, alias, key, vector), vector)
+
+    async def vector_for(self, key: RequestKey) -> list[float] | None:
+        """The embedding of the question of `key`, or None when it is not compared by meaning.
+
+        A bypass skips the lookup but still needs it: the fresh answer it stores
+        must answer similar questions too. Raises `EmbeddingUnavailable`.
+        """
+        if self._embedding is None or not self._embeds(key.question):
+            return None
         assert key.question is not None  # checked by `_embeds`
-        vector = await self._embedding.embed(key.question)
-        answer = await self._nearest(tenant_id, alias, key, vector)
-        return CacheLookup(answer, vector)
+        return await self._embedding.embed(key.question)
 
     async def store(
         self,
@@ -91,10 +114,14 @@ class ResponseCache:
         body: Mapping[str, Any],
         target: Target,
         vector: list[float] | None = None,
+        *,
+        replace: bool = False,
     ) -> None:
         """Keep the answer `body` that `target` generated, until the TTL of `alias` runs out.
 
         With the `vector` of the question, the entry can also answer similar questions.
+        Nothing is written when an answer to the same request is already stored
+        (unless `replace`), or when the tenant has its maximum number of entries.
         """
         entry_key = _entry_key(tenant_id, alias, key)
         entry: dict[FieldT, EncodableT] = {
@@ -108,10 +135,15 @@ class ResponseCache:
             await self._create_index(len(vector))
             entry["scope"] = self._scope(tenant_id, alias, key)
             entry["vector"] = _packed(vector)
-        async with self._redis.pipeline(transaction=True) as pipeline:
-            pipeline.hset(entry_key, mapping=entry)
-            pipeline.pexpire(entry_key, round(self._cached_aliases[alias].ttl * 1000))
-            await pipeline.execute()
+        await self._store_script(
+            keys=[entry_key, _entries_key(tenant_id)],
+            args=[
+                round(self._cached_aliases[alias].ttl * 1000),
+                self._max_entries_per_tenant or 0,
+                "1" if replace else "0",
+                *(item for field_and_value in entry.items() for item in field_and_value),
+            ],
+        )
 
     async def clear(self, tenant_id: int | None, alias: str | None = None) -> int:
         """Remove stored answers and return how many were removed.
@@ -137,11 +169,22 @@ class ResponseCache:
             if _is_entry_key(key, tenant_id, alias):
                 batch.append(key)
             if len(batch) >= _CLEAR_BATCH_SIZE:
-                removed += await self._redis.delete(*batch)
+                removed += await self._remove(batch)
                 batch.clear()
         if batch:
-            removed += await self._redis.delete(*batch)
+            removed += await self._remove(batch)
         return removed
+
+    async def _remove(self, entry_keys: list[bytes]) -> int:
+        """Delete entries, and forget them in the entry count of their tenant."""
+        async with self._redis.pipeline(transaction=False) as pipeline:
+            pipeline.delete(*entry_keys)
+            for entry_key in entry_keys:
+                match = _ENTRY_KEY.fullmatch(entry_key)
+                assert match is not None  # only entry keys are removed
+                pipeline.zrem(_entries_key(int(match[1])), entry_key)
+            removed, *_ = await pipeline.execute()
+        return int(removed)
 
     def _embeds(self, question: str | None) -> bool:
         """True when `question` is compared by meaning (not too long for the embedding model)."""
@@ -228,6 +271,11 @@ _KEY_PREFIX = "cache:"
 
 def _entry_key(tenant_id: int, alias: str, key: RequestKey) -> str:
     return f"{_KEY_PREFIX}{tenant_id}:{alias}:{key.exact}"
+
+
+def _entries_key(tenant_id: int) -> str:
+    """The sorted set that counts the live entries of a tenant (outside the `cache:` prefix)."""
+    return f"cache-entries:{tenant_id}"
 
 
 def _packed(vector: list[float]) -> bytes:

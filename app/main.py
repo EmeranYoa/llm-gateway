@@ -91,6 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redis_client,
         config.cached_aliases,
         EmbeddingClient(embedding, http_client) if embedding is not None else None,
+        max_entries_per_tenant=config.cache_max_entries_per_tenant,
     )
     app.state.usage_log = UsageLog(database_engine)
     app.state.authenticator = Authenticator(
