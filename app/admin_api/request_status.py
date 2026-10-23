@@ -16,6 +16,10 @@ its rows (grouped by `request_id`), in this order:
 
 from enum import StrEnum
 
+from sqlalchemy import ColumnElement, case, func, or_
+
+from app.storage.usage import UsageLogRow
+
 
 class RequestStatus(StrEnum):
     ANSWERED = "answered"
@@ -46,3 +50,25 @@ def request_status(outcomes: list[str]) -> RequestStatus:
     if found & CLIENT_ERROR_OUTCOMES or found == {TOO_LARGE_OUTCOME}:
         return RequestStatus.CLIENT_ERROR
     return RequestStatus.FAILED
+
+
+def status_expression() -> ColumnElement[str]:
+    """The status of a request in SQL: `request_status()` as a CASE, rule by rule.
+
+    For a query on `usage_log` grouped by `request_id`: each condition looks at
+    all the rows of the request.
+    """
+    outcome = UsageLogRow.outcome
+
+    def any_row(outcomes: frozenset[str]) -> ColumnElement[bool]:
+        return func.bool_or(outcome.in_(sorted(outcomes)))
+
+    return case(
+        (any_row(ANSWER_OUTCOMES), RequestStatus.ANSWERED.value),
+        (any_row(CANCELLED_OUTCOMES), RequestStatus.CANCELLED.value),
+        (
+            or_(any_row(CLIENT_ERROR_OUTCOMES), func.bool_and(outcome == TOO_LARGE_OUTCOME)),
+            RequestStatus.CLIENT_ERROR.value,
+        ),
+        else_=RequestStatus.FAILED.value,
+    )
