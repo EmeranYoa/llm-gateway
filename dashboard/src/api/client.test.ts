@@ -1,0 +1,159 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { AdminApiError, checkAdminKey, getMe } from "./client";
+
+const session = vi.hoisted(() => ({
+  adminKey: undefined as string | undefined,
+  save: vi.fn(),
+  destroy: vi.fn(),
+}));
+
+vi.mock("@/lib/session", () => ({ getSession: async () => session }));
+
+vi.mock("next/navigation", () => ({
+  redirect: vi.fn((url: string) => {
+    throw new Error(`redirect:${url}`);
+  }),
+}));
+
+const ADMIN_KEY = "gwa_test_key";
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function stubFetch(response: Response | Error) {
+  const fetchMock = vi.fn(async () => {
+    if (response instanceof Error) throw response;
+    return response;
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+beforeEach(() => {
+  vi.stubEnv("ADMIN_API_URL", "http://admin-api.test:8001");
+  vi.stubEnv("DASHBOARD_SESSION_SECRET", "x".repeat(32));
+  session.adminKey = ADMIN_KEY;
+});
+
+describe("getMe", () => {
+  it("sends the admin key of the session to the admin API", async () => {
+    const fetchMock = stubFetch(jsonResponse(200, { name: "alice" }));
+
+    await expect(getMe()).resolves.toEqual({ name: "alice" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe("http://admin-api.test:8001/admin/v1/me");
+    expect(new Headers(init.headers).get("Authorization")).toBe(
+      `Bearer ${ADMIN_KEY}`,
+    );
+  });
+
+  it("sends to the sign-in page when the session has no key", async () => {
+    session.adminKey = undefined;
+    const fetchMock = stubFetch(jsonResponse(200, { name: "alice" }));
+
+    await expect(getMe()).rejects.toThrow("redirect:/login");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("ends the session when the admin API refuses the key", async () => {
+    stubFetch(
+      jsonResponse(401, {
+        error: {
+          message: "Missing or invalid API key.",
+          type: "invalid_request_error",
+          param: null,
+          code: "invalid_api_key",
+        },
+      }),
+    );
+
+    // The route at /session-expired destroys the session, then sends to /login:
+    // a page being rendered is not allowed to change cookies itself.
+    await expect(getMe()).rejects.toThrow("redirect:/session-expired");
+  });
+
+  it("raises a typed error with the message of the admin API", async () => {
+    stubFetch(
+      jsonResponse(503, {
+        error: {
+          message: "The database is unavailable. Try again later.",
+          type: "api_error",
+          param: null,
+          code: "database_unavailable",
+        },
+      }),
+    );
+
+    const error = await getMe().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AdminApiError);
+    expect(error).toMatchObject({
+      status: 503,
+      code: "database_unavailable",
+      message: "The database is unavailable. Try again later.",
+    });
+    expect(session.destroy).not.toHaveBeenCalled();
+  });
+
+  it("raises a typed error when the answer is not in the error format", async () => {
+    stubFetch(new Response("Bad gateway", { status: 502 }));
+
+    await expect(getMe()).rejects.toMatchObject({
+      name: "AdminApiError",
+      status: 502,
+      code: null,
+    });
+  });
+
+  it("raises a typed error when the admin API cannot be reached", async () => {
+    stubFetch(new TypeError("fetch failed"));
+
+    await expect(getMe()).rejects.toMatchObject({
+      name: "AdminApiError",
+      status: null,
+      code: "admin_api_unreachable",
+    });
+  });
+});
+
+describe("checkAdminKey", () => {
+  it("returns the operator when the key is valid", async () => {
+    const fetchMock = stubFetch(jsonResponse(200, { name: "alice" }));
+
+    await expect(checkAdminKey("gwa_other")).resolves.toEqual({
+      name: "alice",
+    });
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(new Headers(init.headers).get("Authorization")).toBe(
+      "Bearer gwa_other",
+    );
+  });
+
+  it("returns null when the key is refused, without touching the session", async () => {
+    stubFetch(jsonResponse(401, { error: { message: "no" } }));
+
+    await expect(checkAdminKey("gwa_wrong")).resolves.toBeNull();
+    expect(session.destroy).not.toHaveBeenCalled();
+  });
+
+  it("raises a typed error for other failures", async () => {
+    stubFetch(jsonResponse(500, { error: { message: "boom" } }));
+
+    await expect(checkAdminKey("gwa_other")).rejects.toBeInstanceOf(
+      AdminApiError,
+    );
+  });
+});

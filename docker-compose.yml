@@ -66,6 +66,22 @@ services:
       timeout: 3s
       retries: 3
 
+  # Admin dashboard: open http://localhost:3000 and sign in with an admin key.
+  # Its server calls the admin API on this network; the browser never sees the key.
+  dashboard:
+    build: ./dashboard
+    ports:
+      # Local machine only: the session cookie is `Secure`, so another machine
+      # would need HTTPS in front of the dashboard anyway.
+      - "127.0.0.1:3000:3000"
+    environment:
+      ADMIN_API_URL: http://admin-api:8001
+      # Required, at least 32 characters: the dashboard refuses to start without it.
+      DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}
+    depends_on:
+      admin-api:
+        condition: service_healthy
+
   redis:
     image: redis:8.8
     healthcheck:

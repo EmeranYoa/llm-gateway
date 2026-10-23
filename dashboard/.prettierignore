@@ -1,0 +1,7 @@
+.next
+node_modules
+bun.lock
+next-env.d.ts
+# Generated files: openapi.json comes from the admin API, schema.ts from openapi.json.
+openapi.json
+src/api/schema.ts
