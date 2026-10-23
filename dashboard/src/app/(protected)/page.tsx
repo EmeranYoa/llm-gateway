@@ -1,7 +1,7 @@
 import {
   AdminApiError,
   getOverview,
-  getTenantStatistics,
+  listTenantNames,
   keepApiError,
 } from "@/api/client";
 import { ApiErrorNotice } from "@/components/api-error-notice";
@@ -62,9 +62,6 @@ export default async function OverviewPage({ searchParams }: PageProps<"/">) {
  * works with the selected tenant, so an error here does not hide the overview.
  */
 async function loadTenantNames(): Promise<string[]> {
-  // The 24h list is the cheapest one, and every tenant is in it.
-  const list = await getTenantStatistics("24h").catch(keepApiError);
-  return list instanceof AdminApiError
-    ? []
-    : list.tenants.map((row) => row.tenant);
+  const names = await listTenantNames().catch(keepApiError);
+  return names instanceof AdminApiError ? [] : names;
 }

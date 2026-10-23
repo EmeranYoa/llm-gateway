@@ -2,15 +2,15 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AdminApiError, getOverview, getTenantStatistics } from "@/api/client";
-import { overviewFixture, tenantsFixture } from "@/test/fixtures";
+import { AdminApiError, getOverview, listTenantNames } from "@/api/client";
+import { overviewFixture } from "@/test/fixtures";
 
 import OverviewPage from "./page";
 
 vi.mock("@/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/client")>()),
   getOverview: vi.fn(),
-  getTenantStatistics: vi.fn(),
+  listTenantNames: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -46,7 +46,7 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", FakeResizeObserver);
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.mocked(getOverview).mockResolvedValue(overviewFixture());
-  vi.mocked(getTenantStatistics).mockResolvedValue(tenantsFixture());
+  vi.mocked(listTenantNames).mockResolvedValue(["acme", "beta & co"]);
 });
 
 afterEach(cleanup);
@@ -170,7 +170,7 @@ describe("OverviewPage", () => {
   });
 
   it("still shows the overview when the tenant names cannot be loaded", async () => {
-    vi.mocked(getTenantStatistics).mockRejectedValue(
+    vi.mocked(listTenantNames).mockRejectedValue(
       new AdminApiError("boom", 500, null),
     );
 

@@ -8,6 +8,7 @@ import {
   getRequest,
   getTargets,
   getTenantStatistics,
+  listTenantNames,
   keepApiError,
   listRequests,
 } from "./client";
@@ -187,6 +188,19 @@ describe("getOverview", () => {
     expect(url).toBe(
       "http://admin-api.test:8001/admin/v1/overview?period=24h&tenant=acme+%26+co",
     );
+  });
+});
+
+describe("listTenantNames", () => {
+  it("asks for the names only", async () => {
+    const fetchMock = stubFetch(
+      jsonResponse(200, { tenants: ["acme", "beta"] }),
+    );
+
+    await expect(listTenantNames()).resolves.toEqual(["acme", "beta"]);
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe("http://admin-api.test:8001/admin/v1/tenant-names");
   });
 });
 

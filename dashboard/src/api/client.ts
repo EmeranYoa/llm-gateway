@@ -86,6 +86,14 @@ export async function getOverview(
   return callWithSession<Overview>(`/admin/v1/overview?${query}`);
 }
 
+/** Names of every tenant, in alphabetical order: for the tenant filters. */
+export async function listTenantNames(): Promise<string[]> {
+  const list = await callWithSession<components["schemas"]["TenantNames"]>(
+    "/admin/v1/tenant-names",
+  );
+  return list.tenants;
+}
+
 /** One row per tenant for the period, most requests first. */
 export async function getTenantStatistics(
   period: Period,

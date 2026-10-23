@@ -2,8 +2,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AdminApiError, listRequests } from "@/api/client";
-import { listTenantNames } from "@/api/tenant-keys";
+import { AdminApiError, listRequests, listTenantNames } from "@/api/client";
 import { requestPageFixture } from "@/test/fixtures";
 
 import RequestsPage from "./page";
@@ -11,10 +10,6 @@ import RequestsPage from "./page";
 vi.mock("@/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/client")>()),
   listRequests: vi.fn(),
-}));
-
-vi.mock("@/api/tenant-keys", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/api/tenant-keys")>()),
   listTenantNames: vi.fn(),
 }));
 

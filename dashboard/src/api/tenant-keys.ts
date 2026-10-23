@@ -27,16 +27,6 @@ export type AdminActionPage = Schemas["AdminActionPage"];
 /** Admin actions loaded at once by the history. */
 export const ACTIONS_PAGE_SIZE = 20;
 
-/** Names of every tenant, in alphabetical order. */
-export async function listTenantNames(): Promise<string[]> {
-  // The statistics of the tenants are the only list of tenants the admin API
-  // has. The shortest period keeps the query light; only the names are used.
-  const list = await callWithSession<Schemas["TenantStatisticsList"]>(
-    "/admin/v1/tenants?period=24h",
-  );
-  return list.tenants.map((row) => row.tenant).sort();
-}
-
 export async function getTenantKeys(tenant: string): Promise<TenantKeys> {
   return callWithSession<TenantKeys>(
     `/admin/v1/tenants/${encodeURIComponent(tenant)}/keys`,

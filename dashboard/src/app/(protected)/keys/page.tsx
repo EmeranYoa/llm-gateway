@@ -1,5 +1,6 @@
 import { AdminApiError } from "@/api/client";
-import { getTenantKeys, listActions, listTenantNames } from "@/api/tenant-keys";
+import { listTenantNames } from "@/api/client";
+import { getTenantKeys, listActions } from "@/api/tenant-keys";
 import { ApiErrorNotice } from "@/components/api-error-notice";
 import { ActionHistory } from "@/components/keys/action-history";
 import { CreateKeyForm } from "@/components/keys/create-key-form";

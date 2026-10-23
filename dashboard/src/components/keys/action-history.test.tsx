@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -106,7 +107,10 @@ describe("ActionHistory", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "The database is unavailable.",
     );
-    expect(screen.getByRole("button", { name: "Load more" })).toBeEnabled();
+    // The button is enabled again once the transition ends, a moment after the alert.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Load more" })).toBeEnabled(),
+    );
   });
 
   it("says when there is no action yet", () => {

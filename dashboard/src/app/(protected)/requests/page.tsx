@@ -3,8 +3,8 @@ import {
   keepApiError,
   listRequests,
   type RequestPage,
+  listTenantNames,
 } from "@/api/client";
-import { listTenantNames } from "@/api/tenant-keys";
 import { ApiErrorNotice } from "@/components/api-error-notice";
 import { AutoRefresh } from "@/components/auto-refresh";
 import {
