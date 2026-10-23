@@ -12,6 +12,9 @@ timeout) and the total time of the stream (maximum duration).
 The quotas need the token usage of the stream. The gateway asks the provider for
 it even when the client did not (ADR 0005): the usage is then read here and
 removed from what the client receives.
+
+The response cache needs the whole answer: the chunks are also put together
+into a normal (non-streamed) response body.
 """
 
 import asyncio
@@ -71,6 +74,8 @@ class CommittedStream:
         """Number of targets examined before the one that answered."""
         self.usage: StreamUsage | None = None
         """The tokens the stream used, known once it ended normally."""
+        self.answer: dict[str, Any] | None = None
+        """The whole answer as a normal response body, known once the stream ended normally."""
         self._read_so_far = read_so_far
         self._rest = rest
         self._limits = limits
@@ -82,6 +87,7 @@ class CommittedStream:
         self._prompt_tokens: int | None = None
         self._completion_tokens: int | None = None
         self._output_chars = 0
+        self._answer = _AnswerBuilder()
 
     async def chunks(self) -> AsyncIterator[dict[str, Any]]:
         """Yield every chunk of the answer, then record the end of the stream.
@@ -120,6 +126,7 @@ class CommittedStream:
             if (data := self._for_client(chunk)) is not None:
                 yield data
         self.usage = self._usage()
+        self.answer = self._answer.body(self.target.model, self.usage)
         await self._on_end(self.usage)
 
     def _for_client(self, chunk: StreamChunk) -> dict[str, Any] | None:
@@ -133,6 +140,7 @@ class CommittedStream:
         if chunk.completion_tokens is not None:
             self._completion_tokens = chunk.completion_tokens
         self._output_chars += chunk.output_chars
+        self._answer.add(chunk.data)
         if not self._hide_usage or "usage" not in chunk.data:
             return chunk.data
         data = {key: value for key, value in chunk.data.items() if key != "usage"}
@@ -149,3 +157,53 @@ class CommittedStream:
         await self._rest.aclose()
         await self._on_interrupted(reason)
         raise StreamInterrupted(reason)
+
+
+class _AnswerBuilder:
+    """Put the chunks of a stream together into a normal response body.
+
+    Text fields of each delta (`content`, `reasoning`, ...) are joined; other
+    fields keep their last value. Tool calls, streamed in pieces, are not joined:
+    an answer that calls a tool is never stored in the cache anyway.
+    """
+
+    def __init__(self) -> None:
+        self._first: dict[str, Any] | None = None
+        self._choices: dict[int, dict[str, Any]] = {}
+
+    def add(self, data: dict[str, Any]) -> None:
+        if self._first is None:
+            self._first = data
+        for choice in data.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            built = self._choices.setdefault(
+                choice.get("index", 0), {"message": {"role": "assistant"}, "finish_reason": None}
+            )
+            message = built["message"]
+            for field, value in (choice.get("delta") or {}).items():
+                if isinstance(value, str) and field != "role":
+                    message[field] = message.get(field, "") + value
+                elif value is not None:
+                    message[field] = value
+            if choice.get("finish_reason") is not None:
+                built["finish_reason"] = choice["finish_reason"]
+
+    def body(self, model: str, usage: StreamUsage) -> dict[str, Any]:
+        first = self._first or {}
+        body: dict[str, Any] = {
+            "id": first.get("id"),
+            "object": "chat.completion",
+            "created": first.get("created"),
+            "model": model,
+            "choices": [
+                {"index": index, **built} for index, built in sorted(self._choices.items())
+            ],
+        }
+        if usage.prompt_tokens is not None and usage.completion_tokens is not None:
+            body["usage"] = {
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.prompt_tokens + usage.completion_tokens,
+            }
+        return body

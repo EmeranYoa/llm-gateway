@@ -27,6 +27,7 @@ from app.providers.base import (
 from app.routing.acquisition import Refusal, Reservation, TargetGate
 from app.routing.quotas import estimate_call_tokens, estimate_prompt_tokens
 from app.routing.streaming import CommittedStream, StreamUsage
+from app.schemas import asks_for_stream_usage
 
 logger = logging.getLogger(__name__)
 
@@ -340,7 +341,7 @@ class Router:
 
         Raises the same errors as `route`.
         """
-        client_asks_usage = _asks_for_usage(body)
+        client_asks_usage = asks_for_stream_usage(body)
         upstream_body = body if client_asks_usage else _with_usage(body)
 
         async def answer(call: _Call) -> CommittedStream:
@@ -560,12 +561,6 @@ class _Call:
 
     def elapsed_ms(self) -> int:
         return _elapsed_ms(self.started)
-
-
-def _asks_for_usage(body: dict[str, Any]) -> bool:
-    """True when a streamed request asks for the usage chunk itself."""
-    options = body.get("stream_options")
-    return isinstance(options, dict) and options.get("include_usage") is True
 
 
 def _with_usage(body: dict[str, Any]) -> dict[str, Any]:

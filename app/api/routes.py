@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.auth.authenticator import Authenticator
 from app.cache.eligibility import answer_can_be_stored, request_can_use_cache
 from app.cache.keys import RequestKey, request_key
+from app.cache.replay import replayed_chunks
 from app.cache.store import CachedAnswer, ResponseCache
 from app.config import GatewayConfig, Target
 from app.routing.acquisition import (
@@ -39,7 +40,7 @@ from app.routing.router import (
     UnknownAlias,
 )
 from app.routing.streaming import CommittedStream, StreamInterrupted
-from app.schemas import ChatCompletionRequest, ErrorBody, ErrorDetail
+from app.schemas import ChatCompletionRequest, ErrorBody, ErrorDetail, asks_for_stream_usage
 from app.storage.tenants import KeyOwner
 from app.storage.usage import UsageLog
 
@@ -215,7 +216,7 @@ async def chat_completions(
         if cache_lookup.answer is not None:
             # No provider is called: the tenant budget gets its reserved tokens back.
             await tenant_gate.release(admission)
-            return _cached_response(cache_lookup.answer, request_id)
+            return _cached_response(cache_lookup.answer, request, request_id)
     routing = _route(gateway_router, request, attempts, redis_down=admission.degraded)
     try:
         # A streamed request may wait long for its first content: stop if the client leaves.
@@ -227,9 +228,11 @@ async def chat_completions(
         return Response(status_code=CLIENT_CLOSED_REQUEST)
     if not isinstance(result, CommittedStream):
         await _record_tenant_outcome(tenant_gate, admission, result, attempts)
+    cache_headers = {"X-Gateway-Cache": "miss"} if cache_key is not None else {}
     if cache_key is not None:
+        # Stored after the response: the client does not wait for the cache.
+        vector = cache_lookup.vector if cache_lookup is not None else None
         if isinstance(result, RoutedResponse) and answer_can_be_stored(result.body):
-            # Stored after the response: the client does not wait for the cache.
             background_tasks.add_task(
                 response_cache.store,
                 owner.tenant_id,
@@ -237,20 +240,33 @@ async def chat_completions(
                 cache_key,
                 result.body,
                 result.target,
-                cache_lookup.vector if cache_lookup is not None else None,
+                vector,
             )
-        headers = result.headers if isinstance(result, JSONResponse) else response.headers
-        headers["X-Gateway-Cache"] = "miss"
+        elif isinstance(result, CommittedStream):
+            background_tasks.add_task(
+                _store_streamed_answer,
+                response_cache,
+                result,
+                owner.tenant_id,
+                request.model,
+                cache_key,
+                vector,
+            )
     if isinstance(result, JSONResponse):
+        result.headers.update(cache_headers)
         result.headers["X-Gateway-Request-Id"] = request_id
         return result
     if isinstance(result, CommittedStream):
-        # The usage log task runs once the whole stream has been sent.
+        # The usage log and cache tasks run once the whole stream has been sent.
         return StreamingResponse(
             _sse_events(result, tenant_gate, admission),
             media_type="text/event-stream",
-            headers=_routing_headers(result.target, result.fallbacks, request_id),
+            headers={
+                **_routing_headers(result.target, result.fallbacks, request_id),
+                **cache_headers,
+            },
         )
+    response.headers.update(cache_headers)
     response.headers["X-Gateway-Provider"] = result.target.provider.name
     response.headers["X-Gateway-Model"] = result.target.model
     response.headers["X-Gateway-Fallbacks"] = str(result.fallbacks)
@@ -260,7 +276,7 @@ async def chat_completions(
 
 def _cache_key(response_cache: ResponseCache, request: ChatCompletionRequest) -> RequestKey | None:
     """The cache key of the request, or None when the request does not use the cache."""
-    if request.stream or not response_cache.covers(request.model):
+    if not response_cache.covers(request.model):
         return None
     body = request.model_dump(exclude_unset=True)
     if not request_can_use_cache(body):
@@ -268,15 +284,50 @@ def _cache_key(response_cache: ResponseCache, request: ChatCompletionRequest) ->
     return request_key(body)
 
 
-def _cached_response(cached: CachedAnswer, request_id: str) -> JSONResponse:
-    """Answer from the cache, with the headers of the target that generated the answer."""
-    response = JSONResponse(cached.body)
-    response.headers["X-Gateway-Provider"] = cached.provider
-    response.headers["X-Gateway-Model"] = cached.model
-    response.headers["X-Gateway-Fallbacks"] = "0"
-    response.headers["X-Gateway-Request-Id"] = request_id
-    response.headers["X-Gateway-Cache"] = "hit"
-    return response
+def _cached_response(
+    cached: CachedAnswer, request: ChatCompletionRequest, request_id: str
+) -> Response:
+    """Answer from the cache, with the headers of the target that generated the answer.
+
+    A streamed request gets the answer as a stream, sent at once.
+    """
+    headers = {
+        "X-Gateway-Provider": cached.provider,
+        "X-Gateway-Model": cached.model,
+        "X-Gateway-Fallbacks": "0",
+        "X-Gateway-Request-Id": request_id,
+        "X-Gateway-Cache": "hit",
+    }
+    if not request.stream:
+        return JSONResponse(cached.body, headers=headers)
+    with_usage = asks_for_stream_usage(request.model_dump(exclude_unset=True))
+    return StreamingResponse(
+        _replayed_events(replayed_chunks(cached.body, with_usage=with_usage)),
+        media_type="text/event-stream",
+        headers=headers,
+    )
+
+
+async def _replayed_events(chunks: list[dict[str, Any]]) -> AsyncIterator[str]:
+    for chunk in chunks:
+        yield _sse(chunk)
+    yield "data: [DONE]\n\n"
+
+
+async def _store_streamed_answer(
+    response_cache: ResponseCache,
+    stream: CommittedStream,
+    tenant_id: int,
+    alias: str,
+    key: RequestKey,
+    vector: list[float] | None,
+) -> None:
+    """Store the answer of a stream that ended complete.
+
+    It runs after the stream: an interrupted or cancelled stream has no answer.
+    """
+    if stream.answer is not None and answer_can_be_stored(stream.answer):
+        await response_cache.store(tenant_id, alias, key, stream.answer, stream.target, vector)
 
 
 # Status for a request the client abandoned (a convention from nginx): never read.

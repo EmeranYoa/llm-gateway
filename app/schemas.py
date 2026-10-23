@@ -34,6 +34,12 @@ def count_prompt_chars(body: Mapping[str, Any]) -> int:
     return _count_chars([body.get("messages"), body.get("tools"), body.get("response_format")])
 
 
+def asks_for_stream_usage(body: Mapping[str, Any]) -> bool:
+    """True when a streamed request asks for the usage chunk itself (`include_usage`)."""
+    options = body.get("stream_options")
+    return isinstance(options, dict) and options.get("include_usage") is True
+
+
 def _count_chars(value: object) -> int:
     """Sum the lengths of every string found in nested lists and dicts."""
     if isinstance(value, str):
