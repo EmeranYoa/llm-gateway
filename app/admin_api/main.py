@@ -20,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.admin_api import targets
 from app.admin_api.routes import router
 from app.api.routes import (
     authentication_unavailable_handler,
@@ -30,6 +31,7 @@ from app.api.routes import (
 from app.auth.authenticator import AuthenticationUnavailable, Authenticator, InvalidApiKey
 from app.auth.keys import ADMIN_KEY_PREFIX
 from app.config import Settings, load_config
+from app.routing.acquisition import TargetGate
 from app.storage.admin_keys import find_admin
 from app.storage.db import create_database_engine
 from app.storage.redis_client import create_redis_client
@@ -57,6 +59,8 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     app.state.config = config
     app.state.database_engine = database_engine
     app.state.redis = redis_client
+    # Only to read the live state of the targets: the admin API never calls a target.
+    app.state.gate = TargetGate(redis_client, config.cooldown, config.breaker)
     app.state.admin_authenticator = Authenticator(
         database_engine,
         key_prefix=ADMIN_KEY_PREFIX,
@@ -70,6 +74,7 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(SQLAlchemyError, database_unavailable_handler)
     app.add_exception_handler(OSError, database_unavailable_handler)
     app.include_router(router)
+    app.include_router(targets.router)
     return app
 
 

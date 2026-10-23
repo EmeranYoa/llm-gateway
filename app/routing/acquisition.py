@@ -8,7 +8,8 @@ corrects or releases that reservation with `TenantGate.record_*`.
 Before calling a target, the router calls `TargetGate.acquire`. One Lua script
 checks, atomically, everything that can block the target: cooldown, circuit
 breaker and quotas (ADR 0001). After the call, the router reports the outcome
-with one of the `record_*` methods, which run another Lua script.
+with one of the `record_*` methods, which run another Lua script. The admin
+API reads that same state with `TargetGate.state`, through a read-only script.
 
 The state lives in Redis so that several gateway instances share it. When Redis
 is unavailable, both gates let requests through without checks (ADR 0002).
@@ -18,6 +19,7 @@ import datetime as dt
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -73,6 +75,39 @@ class Refusal:
         return f"{label} ({self.wait_seconds:.1f} s left)"
 
 
+class BreakerStatus(StrEnum):
+    """Position of the circuit breaker of a target."""
+
+    CLOSED = "closed"
+    """Calls go through; failures are counted."""
+    OPEN = "open"
+    """The target is skipped until the breaker turns half-open."""
+    HALF_OPEN = "half_open"
+    """A single trial call at a time decides whether the breaker closes or opens again."""
+
+
+@dataclass(frozen=True)
+class TargetState:
+    """What Redis holds about a target right now: everything `TargetGate.acquire` checks."""
+
+    cooldown_until: dt.datetime | None
+    """End of the current cooldown, or None when the target is not in cooldown."""
+    breaker: BreakerStatus
+    breaker_open_until: dt.datetime | None
+    """When the open breaker turns half-open. None unless the breaker is open."""
+    trial_running: bool
+    """True while the single trial call of a half-open breaker is running."""
+    rpm_used: int
+    """Calls reserved in the last 60 s. Only counted when the target has an RPM limit."""
+    tpm_used: int
+    """Tokens reserved in the last 60 s (the real usage once known). Only counted with a TPM
+    limit."""
+    rpd_used: int
+    """Calls counted since the provider's last daily reset. Only counted with an RPD limit."""
+    rpd_resets_at: dt.datetime
+    """Next daily reset of the provider, in UTC."""
+
+
 class TargetGate:
     def __init__(self, redis: Redis, cooldown: CooldownSection, breaker: BreakerSection) -> None:
         self._redis = redis
@@ -80,6 +115,7 @@ class TargetGate:
         self._breaker = breaker
         self._acquire_script = redis.register_script(_lua("acquire_target.lua"))
         self._record_script = redis.register_script(_lua("record_outcome.lua"))
+        self._state_script = redis.register_script(_lua("target_state.lua"))
 
     async def is_available(self) -> bool:
         """Tell whether Redis answers, for the health check."""
@@ -116,13 +152,7 @@ class TargetGate:
         limits = target.limits
         day, next_reset = quota_day(target.provider.daily_reset, dt.datetime.now(dt.UTC))
         result = await self._acquire_script(
-            keys=[
-                _key("cooldown", target),
-                _key("rpm", target),
-                _key("tpm", target),
-                f"{_key('rpd', target)}:{day.isoformat()}",
-                *_breaker_keys(target)[1:],
-            ],
+            keys=_state_keys(target, day),
             args=[
                 reservation_id,
                 estimated_tokens,
@@ -136,6 +166,35 @@ class TargetGate:
         if result[0] == b"ok":
             return Reservation(reservation_id, estimated_tokens, is_trial=int(result[1]) == 1)
         return Refusal(reason=result[0].decode(), wait_seconds=int(result[1]) / 1000)
+
+    async def state(self, target: Target) -> TargetState:
+        """Read the cooldown, breaker and quota state of `target`, for the admin API.
+
+        It writes nothing: a read-only Lua script reads every value at the same
+        moment. Unlike routing, a report has nothing to fail open to, so a
+        `RedisError` is raised when Redis is unavailable.
+        """
+        day, next_reset = quota_day(target.provider.daily_reset, dt.datetime.now(dt.UTC))
+        result = await self._state_script(keys=_state_keys(target, day))
+        now_ms, cooldown_ms, open_ms, half_open, trial_ms, rpm_used, tpm_used, rpd_used = (
+            int(value) for value in result
+        )
+        if open_ms > 0:
+            breaker = BreakerStatus.OPEN
+        elif half_open:
+            breaker = BreakerStatus.HALF_OPEN
+        else:
+            breaker = BreakerStatus.CLOSED
+        return TargetState(
+            cooldown_until=_time_after(now_ms, cooldown_ms) if cooldown_ms > 0 else None,
+            breaker=breaker,
+            breaker_open_until=_time_after(now_ms, open_ms) if open_ms > 0 else None,
+            trial_running=breaker is BreakerStatus.HALF_OPEN and trial_ms > 0,
+            rpm_used=rpm_used,
+            tpm_used=tpm_used,
+            rpd_used=rpd_used,
+            rpd_resets_at=next_reset.astimezone(dt.UTC),
+        )
 
     async def record_success(
         self, target: Target, reservation: Reservation, used_tokens: int | None
@@ -470,6 +529,21 @@ def _key(kind: str, target: Target) -> str:
     return f"{kind}:{target.provider.name}:{target.model}"
 
 
+def _state_keys(target: Target, day: dt.date) -> list[str]:
+    """Keys of everything that can block a target, in the order `acquire_target.lua` expects.
+
+    Cooldown, RPM and TPM windows, RPD counter of the quota `day`, then the
+    breaker "open" key, "half-open" marker and trial slot.
+    """
+    return [
+        _key("cooldown", target),
+        _key("rpm", target),
+        _key("tpm", target),
+        f"{_key('rpd', target)}:{day.isoformat()}",
+        *_breaker_keys(target)[1:],
+    ]
+
+
 def _breaker_keys(target: Target) -> list[str]:
     """Failure window, "open" key, "half-open" marker and trial slot of the breaker."""
     return [
@@ -482,6 +556,11 @@ def _breaker_keys(target: Target) -> list[str]:
 
 def _or_unknown(value: int | None) -> int:
     return -1 if value is None else value
+
+
+def _time_after(now_ms: int, ms: int) -> dt.datetime:
+    """The UTC time `ms` milliseconds after `now_ms`, a Unix time in milliseconds."""
+    return dt.datetime.fromtimestamp((now_ms + ms) / 1000, dt.UTC)
 
 
 def _ms(seconds: float) -> int:
