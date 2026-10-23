@@ -63,7 +63,8 @@ class UsageLogRow(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     request_id: Mapped[str] = mapped_column(String(32), index=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
+    """Indexed for the statistics of the admin API, which read every row of a period."""
     tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"))
     """NULL only for rows written before v0.2.0."""
     api_key_id: Mapped[int | None] = mapped_column(ForeignKey("api_keys.id"), index=True)
