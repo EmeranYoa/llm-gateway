@@ -295,3 +295,11 @@ async def find_tenant_id(engine: AsyncEngine, tenant_name: str) -> int | None:
     """Return the id of the tenant named `tenant_name`, or None when it does not exist."""
     async with engine.connect() as connection:
         return await connection.scalar(select(TenantRow.id).where(TenantRow.name == tenant_name))
+
+
+async def list_tenant_names(engine: AsyncEngine) -> list[str]:
+    """Return the name of every tenant, in alphabetical order."""
+    async with engine.connect() as connection:
+        return list(
+            (await connection.scalars(select(TenantRow.name).order_by(TenantRow.name))).all()
+        )

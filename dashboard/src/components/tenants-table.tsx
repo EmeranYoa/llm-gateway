@@ -27,7 +27,11 @@ const COLUMNS: Column[] = [
   {
     label: "Cost",
     definition: DEFINITIONS.cost,
-    value: (t) => formatMoney(t.cost_usd),
+    // An unknown price is never counted as 0: say how many answers are left out.
+    value: (t) =>
+      t.unpriced_requests > 0
+        ? `${formatMoney(t.cost_usd)} (${formatCount(t.unpriced_requests)} without a price)`
+        : formatMoney(t.cost_usd),
   },
   {
     label: "Error rate",

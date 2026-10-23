@@ -190,6 +190,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/tenant-names": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tenant Names
+         * @description Every tenant name, without any statistics: for the tenant filters of the dashboard.
+         */
+        get: operations["tenant_names_admin_v1_tenant_names_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/tenants": {
         parameters: {
             query?: never;
@@ -1026,6 +1046,14 @@ export interface components {
             tenant: string;
         };
         /**
+         * TenantNames
+         * @description The name of every tenant, in alphabetical order.
+         */
+        TenantNames: {
+            /** Tenants */
+            tenants: string[];
+        };
+        /**
          * TenantStatistics
          * @description What one tenant did in the period.
          */
@@ -1064,6 +1092,11 @@ export interface components {
              * @description Prompt and completion tokens of the answers of providers.
              */
             tokens: number;
+            /**
+             * Unpriced Requests
+             * @description Answers of providers whose model has no price: not included in `cost_usd`.
+             */
+            unpriced_requests: number;
         };
         /**
          * TenantStatisticsList
@@ -1471,6 +1504,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TargetsReport"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    tenant_names_admin_v1_tenant_names_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantNames"];
                 };
             };
             /** @description Validation Error */

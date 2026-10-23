@@ -32,6 +32,7 @@ from app.storage.tenants import (
     find_api_key,
     find_tenant,
     list_api_keys,
+    list_tenant_names,
     revoke_api_key,
     set_tenant_limits,
 )
@@ -144,6 +145,12 @@ class AdminAction(BaseModel):
     """What changed, for example the new limits, a key prefix or the answers removed."""
 
 
+class TenantNames(BaseModel):
+    """The name of every tenant, in alphabetical order."""
+
+    tenants: list[str]
+
+
 class AdminActionPage(BaseModel):
     """Admin actions, newest first."""
 
@@ -160,6 +167,12 @@ class AdminActionPage(BaseModel):
 def _errors(*statuses: int) -> dict[int | str, dict[str, Any]]:
     """Document error answers in the OpenAPI schema."""
     return {status: {"model": ErrorBody} for status in statuses}
+
+
+@router.get("/tenant-names")
+async def tenant_names(_: Admin, database: Database) -> TenantNames:
+    """Every tenant name, without any statistics: for the tenant filters of the dashboard."""
+    return TenantNames(tenants=await list_tenant_names(database))
 
 
 @router.get("/tenants/{name}/keys", response_model=TenantKeys, responses=_errors(404))

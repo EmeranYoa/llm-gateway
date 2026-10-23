@@ -1637,6 +1637,23 @@
         "title": "TenantLimitsView",
         "type": "object"
       },
+      "TenantNames": {
+        "description": "The name of every tenant, in alphabetical order.",
+        "properties": {
+          "tenants": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tenants",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tenants"
+        ],
+        "title": "TenantNames",
+        "type": "object"
+      },
       "TenantStatistics": {
         "description": "What one tenant did in the period.",
         "properties": {
@@ -1677,6 +1694,11 @@
             "description": "Prompt and completion tokens of the answers of providers.",
             "title": "Tokens",
             "type": "integer"
+          },
+          "unpriced_requests": {
+            "description": "Answers of providers whose model has no price: not included in `cost_usd`.",
+            "title": "Unpriced Requests",
+            "type": "integer"
           }
         },
         "required": [
@@ -1684,6 +1706,7 @@
           "requests",
           "tokens",
           "cost_usd",
+          "unpriced_requests",
           "error_rate",
           "cache_hits",
           "saved_cost_usd",
@@ -2455,6 +2478,53 @@
           }
         },
         "summary": "Targets"
+      }
+    },
+    "/admin/v1/tenant-names": {
+      "get": {
+        "description": "Every tenant name, without any statistics: for the tenant filters of the dashboard.",
+        "operationId": "tenant_names_admin_v1_tenant_names_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantNames"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Tenant Names"
       }
     },
     "/admin/v1/tenants": {

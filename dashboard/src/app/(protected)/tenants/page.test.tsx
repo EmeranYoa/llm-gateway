@@ -34,6 +34,16 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("TenantsPage", () => {
+  it("says how many answers of a tenant have no price", async () => {
+    const fixture = tenantsFixture();
+    fixture.tenants[0] = { ...fixture.tenants[0], unpriced_requests: 2 };
+    vi.mocked(getTenantStatistics).mockResolvedValue(fixture);
+
+    await renderPage();
+
+    expect(screen.getByText(/2 without a price/)).toBeInTheDocument();
+  });
+
   it("asks for the period of the URL, 24h by default", async () => {
     await renderPage();
     expect(getTenantStatistics).toHaveBeenLastCalledWith("24h");

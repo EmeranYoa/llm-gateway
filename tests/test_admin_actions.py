@@ -635,3 +635,20 @@ async def test_openapi_schema_describes_the_action_bodies(settings: Settings) ->
     assert "key" not in models["ApiKey"]["properties"]
     revoke = schema["paths"]["/admin/v1/keys/{key_id}/revoke"]["post"]
     assert set(revoke["responses"]) >= {"200", "404", "409"}
+
+
+async def test_tenant_names_lists_every_tenant_in_order(
+    settings: Settings, database_url: str
+) -> None:
+    admin_key = await new_admin_key(database_url)
+    created = sorted([f"names-{uuid4().hex[:8]}" for _ in range(3)])
+    for name in reversed(created):
+        await run_admin(database_url, "create-key", "--tenant", name)
+
+    async with admin_client(settings, admin_key) as client:
+        response = await client.get("/admin/v1/tenant-names")
+
+    assert response.status_code == 200
+    names = response.json()["tenants"]
+    assert names == sorted(names)
+    assert [name for name in names if name in created] == created

@@ -122,6 +122,9 @@ class TenantStatistics(BaseModel):
     requests: int = Field(description="Requests received, tenant quota refusals included.")
     tokens: int = Field(description="Prompt and completion tokens of the answers of providers.")
     cost_usd: float
+    unpriced_requests: int = Field(
+        description="Answers of providers whose model has no price: not included in `cost_usd`."
+    )
     error_rate: float = Field(description="failed / requests. 0 when there is no request.")
     cache_hits: int
     saved_cost_usd: float = Field(description="What the cache hits would have cost.")
@@ -186,6 +189,7 @@ async def tenants(
             func.count().label("requests"),
             func.sum(requests.c.tokens).label("tokens"),
             func.sum(requests.c.cost_usd).label("cost_usd"),
+            func.count().filter(requests.c.unpriced).label("unpriced_requests"),
             func.count().filter(requests.c.status == RequestStatus.FAILED).label("failed"),
             func.count().filter(requests.c.cache_hit).label("cache_hits"),
             func.sum(requests.c.saved_cost_usd).label("saved_cost_usd"),
@@ -211,6 +215,7 @@ async def tenants(
                 requests=row["requests"] or 0,
                 tokens=int(row["tokens"] or 0),
                 cost_usd=_usd(row["cost_usd"]),
+                unpriced_requests=row["unpriced_requests"] or 0,
                 error_rate=_share(row["failed"], row["requests"]),
                 cache_hits=row["cache_hits"] or 0,
                 saved_cost_usd=_usd(row["saved_cost_usd"]),
