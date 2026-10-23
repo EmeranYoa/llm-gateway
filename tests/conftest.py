@@ -62,7 +62,7 @@ def database_url() -> str:
 
 
 # Tests need a real Redis, because the routing state relies on Lua scripts. Locally:
-#   docker run -d --rm --name gateway-test-redis -p 56379:6379 redis:7.4-alpine
+#   docker run -d --rm --name gateway-test-redis -p 56379:6379 redis:8.8
 DEFAULT_TEST_REDIS_URL = "redis://localhost:56379/0"
 
 

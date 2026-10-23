@@ -317,7 +317,7 @@ Requirements: Python 3.12, [uv](https://docs.astral.sh/uv/), Docker.
 uv sync
 
 # Tests need a real Redis (the routing state relies on Lua) and a real PostgreSQL.
-docker run -d --rm --name gateway-test-redis -p 56379:6379 redis:7.4-alpine
+docker run -d --rm --name gateway-test-redis -p 56379:6379 redis:8.8
 docker run -d --rm --name gateway-test-pg -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB=gateway_test -p 55432:5432 postgres:17-alpine
 
