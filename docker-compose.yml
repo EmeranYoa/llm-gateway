@@ -29,6 +29,43 @@ services:
       timeout: 3s
       retries: 3
 
+  # Admin API for the dashboard: the same code, in its own process.
+  # No `ports:` on purpose: it is never published, only reachable on this network.
+  admin-api:
+    build: .
+    command:
+      [
+        "uvicorn",
+        "app.admin_api.main:create_admin_app",
+        "--factory",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8001",
+      ]
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./config:/app/config:ro
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
+    depends_on:
+      gateway:
+        condition: service_healthy # the gateway brings the database schema up to date
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   redis:
     image: redis:8.8
     healthcheck:

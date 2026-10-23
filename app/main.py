@@ -10,7 +10,6 @@ from fastapi.exceptions import RequestValidationError
 from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.api.routes import (
     authentication_unavailable_handler,
@@ -19,6 +18,7 @@ from app.api.routes import (
     validation_error_handler,
 )
 from app.auth.authenticator import AuthenticationUnavailable, Authenticator, InvalidApiKey
+from app.auth.keys import KEY_PREFIX
 from app.cache.embeddings import EmbeddingClient
 from app.cache.store import ResponseCache
 from app.config import Settings, load_config
@@ -26,6 +26,8 @@ from app.providers.base import Provider
 from app.providers.openai_compat import OpenAICompatibleProvider
 from app.routing.acquisition import TargetGate, TenantGate
 from app.routing.router import Router
+from app.storage.db import create_database_engine
+from app.storage.tenants import find_key_owner
 from app.storage.usage import UsageLog
 
 
@@ -46,15 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         socket_connect_timeout=settings.redis_timeout,
         retry=Retry(NoBackoff(), retries=0),
     )
-    # The engine connects lazily: the gateway starts even when PostgreSQL is down.
-    database_engine = create_async_engine(
-        settings.database_url,
-        pool_pre_ping=True,
-        connect_args={
-            "timeout": settings.database_timeout,
-            "command_timeout": settings.database_timeout,
-        },
-    )
+    database_engine = create_database_engine(settings)
 
     providers: dict[str, Provider] = {}
     for targets in config.routes.values():
@@ -96,6 +90,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.usage_log = UsageLog(database_engine)
     app.state.authenticator = Authenticator(
         database_engine,
+        key_prefix=KEY_PREFIX,
+        find_owner=find_key_owner,
         cache_ttl=settings.auth_cache_ttl,
         grace_period=settings.auth_grace_period,
     )

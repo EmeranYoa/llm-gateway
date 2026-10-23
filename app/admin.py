@@ -1,4 +1,5 @@
-"""Admin command line: manage tenants, their gateway API keys and their cached answers.
+"""Admin command line: manage tenants, their gateway API keys and their cached answers,
+and the admin keys of operators.
 
 Usage:
     python -m app.admin create-key --tenant acme [--rpm 60] [--tokens-per-day 200000]
@@ -7,8 +8,13 @@ Usage:
     python -m app.admin set-limits --tenant acme [--rpm 120] [--tokens-per-day 500000]
     python -m app.admin clear-cache --tenant acme [--alias chat-fast]
     python -m app.admin clear-cache --all
+    python -m app.admin create-admin-key --name alice
+    python -m app.admin list-admin-keys
+    python -m app.admin revoke-admin-key 3
 
-A full key is printed only once, by create-key. Other commands show a short prefix.
+A full key is printed only once, by create-key or create-admin-key. Other commands
+show a short prefix. Admin keys (`gwa_`) open the admin API only, never the gateway;
+they can only be created here, never through the web.
 It uses the same `DATABASE_URL` and `REDIS_URL` as the gateway.
 """
 
@@ -23,6 +29,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.cache.store import ResponseCache
 from app.config import Settings
+from app.storage.admin_keys import (
+    AdminKeyInfo,
+    create_admin_key,
+    list_admin_keys,
+    revoke_admin_key,
+)
 from app.storage.tenants import (
     ApiKeyInfo,
     Revocation,
@@ -69,6 +81,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     scope.add_argument("--all", action="store_true", help="remove the answers of every tenant")
     clear_cache.add_argument("--alias", help="with --tenant: remove only the answers of this alias")
 
+    create_admin = commands.add_parser(
+        "create-admin-key", help="create an admin key for an operator, and print it once"
+    )
+    create_admin.add_argument("--name", required=True, help="who the key is for, e.g. alice")
+
+    commands.add_parser(
+        "list-admin-keys", help="list admin keys with their prefix and status, never the full key"
+    )
+
+    revoke_admin = commands.add_parser(
+        "revoke-admin-key", help="revoke an admin key: the admin API refuses it"
+    )
+    revoke_admin.add_argument("id", type=int, help="admin key id, as shown by list-admin-keys")
+
     args = parser.parse_args(argv)
     if args.command == "set-limits" and args.rpm is None and args.tokens_per_day is None:
         set_limits.error("give at least one limit: --rpm and/or --tokens-per-day")
@@ -84,6 +110,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_set_limits(args.tenant, args.rpm, args.tokens_per_day))
     if args.command == "clear-cache":
         return asyncio.run(_clear_cache(args.tenant, args.alias))
+    if args.command == "create-admin-key":
+        return asyncio.run(_create_admin_key(args.name))
+    if args.command == "list-admin-keys":
+        return asyncio.run(_list_admin_keys())
+    if args.command == "revoke-admin-key":
+        return asyncio.run(_revoke_admin_key(args.id))
     return 1
 
 
@@ -176,6 +208,44 @@ async def _clear_cache(tenant: str | None, alias: str | None) -> int:
     return 0
 
 
+async def _create_admin_key(name: str) -> int:
+    engine = create_async_engine(Settings().database_url)
+    try:
+        new_key = await create_admin_key(engine, name)
+    finally:
+        await engine.dispose()
+    print(f"Admin key for '{name}' (shown only once, store it now):")
+    print(new_key.key)
+    return 0
+
+
+async def _list_admin_keys() -> int:
+    engine = create_async_engine(Settings().database_url)
+    try:
+        keys = await list_admin_keys(engine)
+    finally:
+        await engine.dispose()
+    print(_admin_keys_table(keys))
+    return 0
+
+
+async def _revoke_admin_key(admin_key_id: int) -> int:
+    engine = create_async_engine(Settings().database_url)
+    try:
+        revocation = await revoke_admin_key(engine, admin_key_id)
+    finally:
+        await engine.dispose()
+    match revocation:
+        case Revocation.REVOKED:
+            print(f"Admin key {admin_key_id} revoked.")
+            return 0
+        case Revocation.NOT_FOUND:
+            print(f"Error: no admin key with id {admin_key_id}.", file=sys.stderr)
+        case Revocation.ALREADY_REVOKED:
+            print(f"Error: admin key {admin_key_id} is already revoked.", file=sys.stderr)
+    return 1
+
+
 def _positive_int(value: str) -> int:
     """Parse a limit given on the command line: a whole number above zero."""
     if not value.isdigit() or int(value) == 0:
@@ -184,22 +254,38 @@ def _positive_int(value: str) -> int:
 
 
 KEY_COLUMNS = ("ID", "TENANT", "PREFIX", "CREATED (UTC)", "LAST USED (UTC)", "STATUS")
+ADMIN_KEY_COLUMNS = ("ID", "NAME", "PREFIX", "CREATED (UTC)", "LAST USED (UTC)", "STATUS")
 
 
 def _keys_table(keys: Sequence[ApiKeyInfo]) -> str:
-    """Format keys as a table with aligned columns, separated by two spaces."""
-    rows = [KEY_COLUMNS] + [
-        (
-            str(key.id),
-            key.tenant_name,
-            key.prefix,
-            _utc_minute(key.created_at),
-            _utc_minute(key.last_used_at) if key.last_used_at else "never",
-            "revoked" if key.revoked_at else "active",
-        )
-        for key in keys
-    ]
-    widths = [max(len(row[column]) for row in rows) for column in range(len(KEY_COLUMNS))]
+    """Format tenant keys as a table."""
+    return _table(
+        KEY_COLUMNS,
+        [(str(key.id), key.tenant_name, key.prefix, *_key_dates(key)) for key in keys],
+    )
+
+
+def _admin_keys_table(keys: Sequence[AdminKeyInfo]) -> str:
+    """Format admin keys as a table."""
+    return _table(
+        ADMIN_KEY_COLUMNS,
+        [(str(key.id), key.name, key.prefix, *_key_dates(key)) for key in keys],
+    )
+
+
+def _key_dates(key: ApiKeyInfo | AdminKeyInfo) -> tuple[str, str, str]:
+    """Creation, last use and status of a key, as table cells."""
+    return (
+        _utc_minute(key.created_at),
+        _utc_minute(key.last_used_at) if key.last_used_at else "never",
+        "revoked" if key.revoked_at else "active",
+    )
+
+
+def _table(columns: Sequence[str], cells: Sequence[Sequence[str]]) -> str:
+    """Format rows as a table with aligned columns, separated by two spaces."""
+    rows = [columns, *cells]
+    widths = [max(len(row[column]) for row in rows) for column in range(len(columns))]
     return "\n".join(
         "  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip()
         for row in rows

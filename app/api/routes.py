@@ -71,14 +71,14 @@ def get_tenant_gate(request: Request) -> TenantGate:
     return cast(TenantGate, request.app.state.tenant_gate)
 
 
-def get_authenticator(request: Request) -> Authenticator:
+def get_authenticator(request: Request) -> Authenticator[KeyOwner]:
     """Return the API key checker built at startup."""
-    return cast(Authenticator, request.app.state.authenticator)
+    return cast(Authenticator[KeyOwner], request.app.state.authenticator)
 
 
 async def authenticate(
     request: Request,
-    authenticator: Annotated[Authenticator, Depends(get_authenticator)],
+    authenticator: Annotated[Authenticator[KeyOwner], Depends(get_authenticator)],
     authorization: Annotated[str | None, Header()] = None,
 ) -> KeyOwner:
     """Check the gateway API key of the request (`Authorization: Bearer <key>`)."""
