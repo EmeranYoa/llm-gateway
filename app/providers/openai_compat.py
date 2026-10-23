@@ -66,8 +66,14 @@ class OpenAICompatibleProvider(Provider):
         except httpx.TransportError as exc:
             raise ProviderUnavailable(f"network error ({type(exc).__name__})") from exc
         _raise_for_error_status(response)
-        body = response.json()
-        return ProviderResponse(body, *_reported_usage(body))
+        try:
+            completion = response.json()
+        except ValueError:
+            completion = None
+        if not isinstance(completion, dict):
+            # For example an HTML error page from a proxy in front of the provider.
+            raise ProviderUnavailable("the response is not a JSON object")
+        return ProviderResponse(completion, *_reported_usage(completion))
 
     async def stream_chat_completion(
         self,

@@ -59,8 +59,11 @@ async def test_all_targets_failing_returns_503_in_openai_format(
         httpx.Response(503),
         httpx.ConnectError("connection refused"),
         httpx.ReadError("connection reset"),
+        # A proxy in front of the provider may answer 200 with an HTML page.
+        httpx.Response(200, text="<html>Bad gateway</html>"),
+        httpx.Response(200, json=["not", "a", "completion"]),
     ],
-    ids=["500", "502", "503", "connect-error", "read-error"],
+    ids=["500", "502", "503", "connect-error", "read-error", "not-json", "not-an-object"],
 )
 async def test_unavailable_target_fails_over_to_next_target(
     failover_client: AsyncClient,
