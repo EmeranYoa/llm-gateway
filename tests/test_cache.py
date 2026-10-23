@@ -225,3 +225,96 @@ def test_invalid_cache_section_stops_the_gateway(
 
     with pytest.raises(ConfigError, match=error):
         load_config(settings.gateway_config_path, environ={"GROQ_API_KEY": GROQ_KEY})
+
+
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}},
+}
+TEXT_PART = {"type": "text", "text": "Hi"}
+IMAGE_PART = {"type": "image_url", "image_url": {"url": "https://images.test/cat.png"}}
+AUDIO_PART = {"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}}
+
+
+def with_content(*parts: dict[str, Any]) -> dict[str, Any]:
+    """The usual request, with a user message made of the content `parts`."""
+    return with_changes(messages=[{"role": "user", "content": list(parts)}])
+
+
+@pytest.mark.parametrize(
+    "request_body",
+    [
+        with_changes(tools=[WEATHER_TOOL]),
+        with_changes(tools=[]),
+        with_changes(functions=[WEATHER_TOOL["function"]]),
+        with_changes(n=2),
+        with_changes(seed=42),
+        with_changes(seed=None),
+        with_content(TEXT_PART, IMAGE_PART),
+        with_content(AUDIO_PART),
+    ],
+    ids=["tools", "empty-tools", "functions", "n-2", "seed", "null-seed", "image", "audio"],
+)
+async def test_request_unsafe_to_replay_does_not_use_the_cache(
+    write_config: WriteConfig, groq: respx.Route, request_body: dict[str, Any]
+) -> None:
+    async with gateway_client(write_config(cache_config())) as client:
+        responses = [await client.post("/v1/chat/completions", json=request_body) for _ in range(2)]
+
+    # Exactly like an alias without cache: no lookup, no store, no header.
+    assert [response.status_code for response in responses] == [200, 200]
+    assert all("X-Gateway-Cache" not in response.headers for response in responses)
+    assert groq.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "request_body",
+    [with_changes(n=1), with_content(TEXT_PART, {"type": "text", "text": "How are you?"})],
+    ids=["n-1", "text-parts"],
+)
+async def test_request_safe_to_replay_uses_the_cache(
+    write_config: WriteConfig, groq: respx.Route, request_body: dict[str, Any]
+) -> None:
+    async with gateway_client(write_config(cache_config())) as client:
+        responses = [await client.post("/v1/chat/completions", json=request_body) for _ in range(2)]
+
+    assert [response.headers["X-Gateway-Cache"] for response in responses] == ["miss", "hit"]
+    assert groq.call_count == 1
+
+
+def answer_with(*finish_reasons: str | None) -> dict[str, Any]:
+    """A completion body with one choice per finish reason (None: no `finish_reason` field)."""
+    body = completion_body(GROQ_MODEL)
+    choices = []
+    for index, finish_reason in enumerate(finish_reasons):
+        choice = {"index": index, "message": {"role": "assistant", "content": "Hello!"}}
+        if finish_reason is not None:
+            choice["finish_reason"] = finish_reason
+        choices.append(choice)
+    body["choices"] = choices
+    return body
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        answer_with("length"),
+        answer_with("content_filter"),
+        answer_with("tool_calls"),
+        answer_with(None),
+        answer_with("stop", "length"),
+        answer_with(),
+    ],
+    ids=["length", "content-filter", "tool-calls", "missing", "one-choice-cut", "no-choice"],
+)
+async def test_answer_that_did_not_stop_normally_is_not_stored(
+    write_config: WriteConfig, groq: respx.Route, answer: dict[str, Any]
+) -> None:
+    groq.side_effect = lambda _: httpx.Response(200, json=answer)
+
+    async with gateway_client(write_config(cache_config())) as client:
+        responses = [await client.post("/v1/chat/completions", json=CHAT_REQUEST) for _ in range(2)]
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert [response.headers["X-Gateway-Cache"] for response in responses] == ["miss", "miss"]
+    assert groq.call_count == 2

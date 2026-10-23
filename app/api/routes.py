@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.auth.authenticator import Authenticator
+from app.cache.eligibility import answer_can_be_stored, request_can_use_cache
 from app.cache.keys import RequestKey, request_key
 from app.cache.store import CachedAnswer, ResponseCache
 from app.config import GatewayConfig, Target
@@ -227,7 +228,7 @@ async def chat_completions(
     if not isinstance(result, CommittedStream):
         await _record_tenant_outcome(tenant_gate, admission, result, attempts)
     if cache_key is not None:
-        if isinstance(result, RoutedResponse):
+        if isinstance(result, RoutedResponse) and answer_can_be_stored(result.body):
             # Stored after the response: the client does not wait for the cache.
             background_tasks.add_task(
                 response_cache.store,
@@ -261,7 +262,10 @@ def _cache_key(response_cache: ResponseCache, request: ChatCompletionRequest) ->
     """The cache key of the request, or None when the request does not use the cache."""
     if request.stream or not response_cache.covers(request.model):
         return None
-    return request_key(request.model_dump(exclude_unset=True))
+    body = request.model_dump(exclude_unset=True)
+    if not request_can_use_cache(body):
+        return None
+    return request_key(body)
 
 
 def _cached_response(cached: CachedAnswer, request_id: str) -> JSONResponse:
