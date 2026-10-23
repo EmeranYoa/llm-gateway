@@ -6,7 +6,7 @@ import type { AdminAction, AdminActionPage } from "@/api/tenant-keys";
 import type { LoadActionsResult } from "@/lib/key-actions";
 
 import { ErrorMessage, secondaryButtonClass } from "./form-feedback";
-import { LocalTime } from "./local-time";
+import { LocalDateTime } from "@/components/local-time";
 
 type ActionHistoryProps = {
   /** The newest actions, loaded with the page. */
@@ -107,7 +107,7 @@ export function ActionHistory({ firstPage, loadMore }: ActionHistoryProps) {
             {actions.map((action) => (
               <tr key={action.id} className="border-t border-slate-100">
                 <td className="px-3 py-2 whitespace-nowrap">
-                  <LocalTime value={action.created_at} />
+                  <LocalDateTime iso={action.created_at} />
                 </td>
                 <td className="px-3 py-2">{action.actor}</td>
                 <td className="px-3 py-2 font-mono text-xs">{action.action}</td>

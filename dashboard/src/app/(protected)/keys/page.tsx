@@ -3,6 +3,7 @@ import { getTenantKeys, listActions, listTenantNames } from "@/api/tenant-keys";
 import { ApiErrorNotice } from "@/components/api-error-notice";
 import { ActionHistory } from "@/components/keys/action-history";
 import { CreateKeyForm } from "@/components/keys/create-key-form";
+import { TimeZoneName } from "@/components/local-time";
 import { TenantKeysPanel } from "@/components/keys/tenant-keys-panel";
 import { TenantList } from "@/components/keys/tenant-list";
 import { createKeyAction, loadActionsAction } from "@/lib/key-actions";
@@ -45,6 +46,9 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
         <p className="text-sm text-slate-600">
           Manage the API keys and limits of tenants. Gateways see changes within
           60 seconds.
+        </p>
+        <p className="text-xs text-slate-600">
+          <TimeZoneName />
         </p>
       </header>
 

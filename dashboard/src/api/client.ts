@@ -5,7 +5,9 @@ import { redirect } from "next/navigation";
 import { readDashboardConfig } from "@/lib/config";
 import { getSession } from "@/lib/session";
 
-import type { paths } from "./schema";
+import type { Period } from "@/lib/period";
+
+import type { components, paths } from "./schema";
 
 /**
  * Client of the admin API, used only by the Next.js server.
@@ -16,6 +18,12 @@ import type { paths } from "./schema";
 
 export type Me =
   paths["/admin/v1/me"]["get"]["responses"][200]["content"]["application/json"];
+
+export type Overview = components["schemas"]["Overview"];
+export type SeriesPoint = components["schemas"]["SeriesPoint"];
+export type TenantStatisticsList =
+  components["schemas"]["TenantStatisticsList"];
+export type TenantStatistics = components["schemas"]["TenantStatistics"];
 
 /** Where to send the operator when the admin API refuses the key of the session. */
 export const SESSION_EXPIRED_PATH = "/session-expired";
@@ -38,9 +46,45 @@ export class AdminApiError extends Error {
   }
 }
 
+/**
+ * For `.catch()` on a call of this module: an `AdminApiError` becomes a value
+ * the page can show; anything else is thrown again (a redirect to /login, or
+ * a bug). Returning the error lets a page show it instead of its data.
+ */
+export function keepApiError(caught: unknown): AdminApiError {
+  if (caught instanceof AdminApiError) {
+    return caught;
+  }
+  throw caught;
+}
+
 /** Return the operator who owns the admin key of the session. */
 export async function getMe(): Promise<Me> {
   return callWithSession<Me>("/admin/v1/me");
+}
+
+/**
+ * Totals and time series of a period, for every tenant or for one.
+ *
+ * An unknown tenant raises an `AdminApiError` with status 404 (`tenant_not_found`).
+ */
+export async function getOverview(
+  period: Period,
+  tenant: string | null,
+): Promise<Overview> {
+  const query = new URLSearchParams({ period });
+  if (tenant !== null) {
+    query.set("tenant", tenant);
+  }
+  return callWithSession<Overview>(`/admin/v1/overview?${query}`);
+}
+
+/** One row per tenant for the period, most requests first. */
+export async function getTenantStatistics(
+  period: Period,
+): Promise<TenantStatisticsList> {
+  const query = new URLSearchParams({ period });
+  return callWithSession<TenantStatisticsList>(`/admin/v1/tenants?${query}`);
 }
 
 /**

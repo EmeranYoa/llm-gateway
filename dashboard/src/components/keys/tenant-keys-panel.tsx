@@ -7,7 +7,7 @@ import {
 
 import { CacheClearForm } from "./cache-clear-form";
 import { LimitsForm } from "./limits-form";
-import { LocalTime } from "./local-time";
+import { LocalDateTime } from "@/components/local-time";
 import { RevokeKeyButton } from "./revoke-key-button";
 
 /** The selected tenant: its limits, its keys, and the forms that change them. */
@@ -120,11 +120,11 @@ function KeysTable({ data }: { data: TenantKeys }) {
             <tr key={key.id} className="border-t border-slate-100 align-top">
               <td className="px-3 py-2 font-mono text-xs">{key.prefix}...</td>
               <td className="px-3 py-2 whitespace-nowrap">
-                <LocalTime value={key.created_at} />
+                <LocalDateTime iso={key.created_at} />
               </td>
               <td className="px-3 py-2 whitespace-nowrap">
                 {key.last_used_at ? (
-                  <LocalTime value={key.last_used_at} />
+                  <LocalDateTime iso={key.last_used_at} />
                 ) : (
                   "never"
                 )}
@@ -132,7 +132,7 @@ function KeysTable({ data }: { data: TenantKeys }) {
               <td className="px-3 py-2">
                 {key.revoked_at ? (
                   <span className="text-slate-500">
-                    Revoked <LocalTime value={key.revoked_at} />
+                    Revoked <LocalDateTime iso={key.revoked_at} />
                   </span>
                 ) : (
                   <span className="font-medium text-emerald-700">Active</span>

@@ -12,7 +12,6 @@ import type { AdminAction, AdminActionPage } from "@/api/tenant-keys";
 import type { LoadActionsResult } from "@/lib/key-actions";
 
 import { ActionHistory, summarizeDetails } from "./action-history";
-import { formatDateTime } from "./local-time";
 
 afterEach(cleanup);
 
@@ -136,15 +135,5 @@ describe("summarizeDetails", () => {
 
   it("shows a dash when there is no detail", () => {
     expect(summarizeDetails(action(1, { details: {} }))).toBe("-");
-  });
-});
-
-describe("formatDateTime", () => {
-  it("shows the date, the time and the time zone", () => {
-    const text = formatDateTime("2026-10-23T12:30:00Z", "UTC");
-
-    expect(text).toMatch(/2026/);
-    expect(text).toMatch(/12:30/);
-    expect(text).toMatch(/UTC/);
   });
 });

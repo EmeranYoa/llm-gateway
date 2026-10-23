@@ -20,6 +20,35 @@ Redis itself.
   dashboard (Next.js check, `allowedOrigins` is empty in `next.config.ts`). Behind
   a reverse proxy, forward `X-Forwarded-Host`, or add the public host there.
 
+## Screens
+
+- **Overview** (`/`): key figures of a period (requests, error rate, fallback rate,
+  latency, time to first token, cost, cache savings) and charts per hour (24h) or
+  per UTC day (7d, 30d). Each figure has a tooltip with its exact definition.
+- **Tenants** (`/tenants`): one row per tenant. A row opens the overview of that
+  tenant for the same period.
+
+Filters live in the URL (`/?period=7d&tenant=acme`), so a view can be bookmarked.
+Both screens reload their data every 10 s without a visible reload. Times come
+from the admin API in UTC and are shown in the browser's time zone.
+
+## Building blocks for screens
+
+Reuse these when you add a screen:
+
+| Piece                                                                        | What it does                                                                                                                                                                                                                                                                                                 |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `AutoRefresh` (`components/auto-refresh.tsx`)                                | Wraps the data of a server page. Props: `updatedAt` (ISO), `failed`, `dataKey` (the filters), `intervalMs` (default 10 s). Calls `router.refresh()`, shows "Updated N s ago" and a pause button, pauses while the tab is hidden, and keeps the last data with an "Update failed" badge when a refresh fails. |
+| `PeriodFilter`, `TenantFilter` (`components/filters.tsx`)                    | Write `?period=` and `?tenant=` to the URL, other params kept. Props: `value` (from the server page), and `tenants` (names) for `TenantFilter`. Parse the params with `parsePeriod` / `parseTenant` (`lib/period.ts`).                                                                                       |
+| `StatCard` (`components/stat-card.tsx`)                                      | One figure. Props: `label`, `value` (formatted), `definition` (tooltip), optional `detail` and `warning`. Definitions live in `lib/definitions.ts`.                                                                                                                                                          |
+| `BarChartCard` (`components/bar-chart-card.tsx`)                             | A titled Recharts bar chart. Props: `title`, `data` (`label`, `tooltipLabel`, one value per series), `series` (`key`, `name`, `color`), `formatValue`, optional `formatTick`, `note` and `integer`. Animates on the first render only.                                                                       |
+| `LocalDateTime`, `TimeZoneName`, `PeriodRange` (`components/local-time.tsx`) | Show UTC times of the admin API in the browser's time zone, and name it.                                                                                                                                                                                                                                     |
+| `lib/format.ts`                                                              | `formatMoney` (`null` → `unknown`), `formatMoneyTick`, `formatRate`, `formatDuration` (`null` → `n/a`), `formatCount`, `formatAge`, `formatDateTime`, `formatBucket`. English (`en-US`) everywhere, so server and browser agree.                                                                             |
+
+A server page loads its data with `src/api/client.ts`, turns an `AdminApiError`
+into a value with `.catch(keepApiError)`, and passes the result to `AutoRefresh`
+(see `src/app/(protected)/tenants/page.tsx`).
+
 ## Environment variables
 
 | Variable                   | Required | Description                                                                                                |

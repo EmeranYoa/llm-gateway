@@ -1,5 +1,43 @@
-import { ComingSoon } from "@/components/coming-soon";
+import { AdminApiError, getTenantStatistics, keepApiError } from "@/api/client";
+import { ApiErrorNotice } from "@/components/api-error-notice";
+import { AutoRefresh } from "@/components/auto-refresh";
+import { PeriodFilter } from "@/components/filters";
+import { PeriodRange } from "@/components/local-time";
+import { TenantsTable } from "@/components/tenants-table";
+import { parsePeriod } from "@/lib/period";
 
-export default function TenantsPage() {
-  return <ComingSoon title="Tenants" />;
+/**
+ * What each tenant did in the period. A row opens the overview of the tenant.
+ * The period lives in the URL: `/tenants?period=7d`.
+ */
+export default async function TenantsPage({
+  searchParams,
+}: PageProps<"/tenants">) {
+  const period = parsePeriod((await searchParams).period);
+
+  const report = await getTenantStatistics(period).catch(keepApiError);
+  const list = report instanceof AdminApiError ? null : report;
+
+  return (
+    <section className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h1 className="text-xl font-semibold">Tenants</h1>
+        <PeriodFilter value={period} />
+      </div>
+      <AutoRefresh
+        updatedAt={list?.end ?? null}
+        failed={list === null}
+        dataKey={period}
+      >
+        {list ? (
+          <div className="flex flex-col gap-3">
+            <PeriodRange start={list.start} end={list.end} />
+            <TenantsTable tenants={list.tenants} period={period} />
+          </div>
+        ) : (
+          report instanceof AdminApiError && <ApiErrorNotice error={report} />
+        )}
+      </AutoRefresh>
+    </section>
+  );
 }

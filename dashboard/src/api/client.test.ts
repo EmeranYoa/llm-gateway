@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AdminApiError, checkAdminKey, getMe } from "./client";
+import {
+  AdminApiError,
+  checkAdminKey,
+  getMe,
+  getOverview,
+  getTenantStatistics,
+  keepApiError,
+} from "./client";
 
 const session = vi.hoisted(() => ({
   adminKey: undefined as string | undefined,
@@ -155,5 +162,52 @@ describe("checkAdminKey", () => {
     await expect(checkAdminKey("gwa_other")).rejects.toBeInstanceOf(
       AdminApiError,
     );
+  });
+});
+
+describe("getOverview", () => {
+  it("asks for the period, for every tenant", async () => {
+    const fetchMock = stubFetch(jsonResponse(200, { period: "7d" }));
+
+    await expect(getOverview("7d", null)).resolves.toEqual({ period: "7d" });
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe("http://admin-api.test:8001/admin/v1/overview?period=7d");
+  });
+
+  it("asks for one tenant, with its name encoded", async () => {
+    const fetchMock = stubFetch(jsonResponse(200, {}));
+
+    await getOverview("24h", "acme & co");
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe(
+      "http://admin-api.test:8001/admin/v1/overview?period=24h&tenant=acme+%26+co",
+    );
+  });
+});
+
+describe("getTenantStatistics", () => {
+  it("asks for the period", async () => {
+    const fetchMock = stubFetch(jsonResponse(200, { tenants: [] }));
+
+    await expect(getTenantStatistics("30d")).resolves.toEqual({ tenants: [] });
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe("http://admin-api.test:8001/admin/v1/tenants?period=30d");
+  });
+});
+
+describe("keepApiError", () => {
+  it("returns an error of the admin API, to show on the page", () => {
+    const error = new AdminApiError("boom", 500, null);
+
+    expect(keepApiError(error)).toBe(error);
+  });
+
+  it("throws anything else again, such as a redirect", () => {
+    const redirect = new Error("redirect:/login");
+
+    expect(() => keepApiError(redirect)).toThrow(redirect);
   });
 });
