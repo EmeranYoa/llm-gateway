@@ -25,7 +25,8 @@ This is true of paid plans and of free tiers alike; free tiers only show it soon
 - **Cooldown and circuit breaker.** Rate-limited targets are skipped for the delay the provider asks for; unstable targets are skipped by a circuit breaker.
 - **Shared state.** Quotas, cooldowns and breakers live in Redis, so several gateway instances share them.
 - **Degraded mode.** If Redis goes down, the gateway keeps routing (without quota checks) instead of failing.
-- **Usage log.** Every examined target is logged in PostgreSQL with its tenant and API key: outcome, latency, tokens, fallbacks. Prompts are never stored.
+- **Usage log.** Every examined target is logged in PostgreSQL with its tenant and API key: outcome, latency, tokens, cost, fallbacks. Prompts are never stored.
+- **Admin dashboard.** A web dashboard shows traffic, errors, latency, cost and cache savings, per tenant and per provider, the live state of every provider, and the routing path of each request. Operators also manage tenant keys and limits there. It talks to an admin API that is never exposed to the public network.
 
 ## Use cases
 
@@ -60,6 +61,16 @@ flowchart LR
     router -->|"after the response"| pg[("PostgreSQL<br/>tenants, api_keys,<br/>usage_log")]
 ```
 
+Operators use the dashboard. Its Next.js server calls a separate admin API, on the internal network only; the browser never sees the admin key:
+
+```mermaid
+flowchart LR
+    operator["Operator<br/>(browser)"] -->|"session cookie<br/>(encrypted, httpOnly)"| dashboard["Dashboard<br/>(Next.js server, port 3000)"]
+    dashboard -->|"Bearer gwa_... key<br/>internal network only"| adminapi["Admin API<br/>(FastAPI, port 8001,<br/>never published)"]
+    adminapi -->|"statistics, keys,<br/>admin actions"| pg[("PostgreSQL")]
+    adminapi -->|"live state of targets,<br/>cache clear"| redis[("Redis")]
+```
+
 For each request, the router walks the targets of the alias in order:
 
 ```mermaid
@@ -83,7 +94,8 @@ flowchart TD
 |---|---|
 | `app/api/routes.py` | HTTP endpoints, OpenAI error format, response headers |
 | `app/auth/` | API key generation, hashing and verification (with its cache) |
-| `app/admin.py` | Admin command line: create, list and revoke keys, set tenant limits |
+| `app/admin.py` | Admin command line: tenant keys and limits, admin keys, cache clear, usage log purge |
+| `app/admin_api/` | Admin API for the dashboard: statistics, live state of targets, requests and their routing path, admin actions |
 | `app/routing/router.py` | Failover loop, deadline, outcome of each attempt |
 | `app/routing/streaming.py` | A stream after its first content: idle timeout, maximum duration, token usage |
 | `app/routing/acquisition.py` + `app/routing/lua/` | Atomic Redis scripts: tenant quotas, cooldown, circuit breaker, provider quota reservation |
@@ -92,6 +104,7 @@ flowchart TD
 | `app/providers/` | Provider interface and the generic OpenAI-compatible adapter |
 | `app/storage/` | Tenants, API keys and usage log (SQLAlchemy async, Alembic migrations in `migrations/`) |
 | `app/config.py` | Environment settings and `config/gateway.yaml` validation |
+| `dashboard/` | Next.js admin dashboard (TypeScript); its API types are generated from the admin API's OpenAPI schema |
 
 ## Quickstart
 
@@ -111,6 +124,15 @@ curl http://localhost:8000/health
 
 # Create an API key for your application (shown only once: store it now).
 docker compose exec gateway python -m app.admin create-key --tenant demo
+```
+
+To use the dashboard, also set its session secret in `.env` before `docker compose up`, then create an admin key and open [http://localhost:3000](http://localhost:3000):
+
+```bash
+# In .env: DASHBOARD_SESSION_SECRET=<at least 32 characters>, for example:
+openssl rand -base64 32
+
+docker compose exec gateway python -m app.admin create-admin-key --name alice
 ```
 
 No API key at all? Run the optional local model instead (about 2 GB to download):
@@ -269,6 +291,63 @@ docker compose exec gateway python -m app.admin set-limits --tenant acme --token
 - Tenant quotas are checked once per request, before routing, on top of the provider quotas. The token budget works like the provider TPM: the estimate is reserved before the call, then replaced by the real usage on success, given back when the whole request fails, and kept on timeout.
 - Verified keys are cached in memory for 60 s (`AUTH_CACHE_TTL`): most requests need no database query. A revoked key or new limits take effect within that time.
 
+## Admin dashboard
+
+The dashboard is for operators: whoever runs the gateway. It shows every tenant, and can filter on one.
+
+| Screen | What it shows |
+|---|---|
+| **Overview** | Requests, error rate, fallback rate, latency p50/p95, time to first token, tokens, cost, cache hit rate and savings, with charts per hour (24 h) or per UTC day (7 and 30 days). |
+| **Tenants** | One row per tenant: requests, tokens, cost, error rate, cache savings, quota refusals. A row opens the overview of that tenant. |
+| **Providers** | For each provider/model: success rate, latency, `429`s, timeouts, skips, and its **live state** read in Redis: cooldown, circuit breaker, quotas used. It shows at a glance why traffic moves to another provider. |
+| **Requests** | Recent requests, filtered by tenant, alias and status. A request opens its **routing path**: every target examined, in order, with its outcome and latency. |
+| **Keys** | Create a tenant key (shown once), revoke a key, change a tenant's limits, clear its cache, and the history of admin actions. |
+
+Live screens refresh every 10 seconds without reloading the page, and pause while the tab is hidden. Times are shown in your browser's time zone.
+
+The indicators are counted per request, the way a client sees them:
+
+- **Error rate**: requests that got no answer (`503`, `504`, a stream interrupted). Client errors (`400`, an unknown alias, a tenant over its quota) and requests the client cancelled are counted apart: they are not failures of the gateway.
+- **Latency**: the whole request, all its attempts included. Cache hits are left out and shown apart, so they do not make providers look fast.
+- **Cost**: the sum of the cost of each answer (see below). Answers of a model without a price are counted and shown as such, never as 0.
+
+### Admin keys and security
+
+The dashboard opens with an **admin key** (`gwa_`), created with the command line only:
+
+```bash
+docker compose exec gateway python -m app.admin create-admin-key --name alice
+docker compose exec gateway python -m app.admin list-admin-keys
+docker compose exec gateway python -m app.admin revoke-admin-key 3
+```
+
+- Admin keys and tenant keys never cross: a `gwa_` key is refused by the gateway, a `gw_` key by the admin API. Admin keys are stored as SHA-256 hashes, like tenant keys.
+- The admin API runs in its own container, on port 8001, which Docker Compose never publishes: even a leaked admin key is useless from outside the internal network.
+- The dashboard's server keeps the admin key in an encrypted, `httpOnly`, `SameSite=Strict` cookie and calls the admin API itself: the key never reaches the browser's JavaScript. A session lasts 8 hours; a revoked admin key stops working within 60 seconds.
+- Docker Compose publishes the dashboard on `127.0.0.1:3000` only. Its session cookie is `Secure`: to reach it from another machine, put it behind HTTPS.
+- Every change made from the dashboard or the command line (keys, limits, cache clear, purge) is recorded in the `admin_actions` table, shown on the Keys screen. Key values are never recorded.
+
+### Costs
+
+Give each model its price in `gateway.yaml`, in US dollars per million tokens:
+
+```yaml
+models:
+  openai/gpt-oss-20b: { rpm: 30, price: { input: 0.075, output: 0.30 } }   # example: check the provider's pricing page
+```
+
+The cost of each usage row is computed when it is written, from the real token usage and the price of that moment, so a later price change does not rewrite the past. A cache hit costs 0 and records what it saved at the price of the model that first answered. The example configuration prices its free-tier models at 0.
+
+### Retention
+
+The usage log keeps every row until you delete it. The dashboard looks back 30 days at most. To keep the table small, run the purge from a scheduler, for example every night with cron:
+
+```bash
+0 3 * * * docker compose -f /path/to/docker-compose.yml exec -T gateway python -m app.admin purge-usage-log --older-than-days 90
+```
+
+It deletes in small batches, so the gateway keeps writing while it runs, and records the purge as an admin action.
+
 ## Configuration reference
 
 ### Environment variables
@@ -284,6 +363,8 @@ docker compose exec gateway python -m app.admin set-limits --tenant acme --token
 | `AUTH_CACHE_TTL` | `60` | Seconds a verified API key is trusted without a new database check. A revoked key or new tenant limits take effect within that time. |
 | `AUTH_GRACE_PERIOD` | `900` | Seconds a verified API key keeps working while PostgreSQL is unavailable. Other keys get `503 authentication_unavailable`. |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `gateway` | Credentials of the PostgreSQL started by Docker Compose. |
+| `DASHBOARD_SESSION_SECRET` | (none) | Dashboard only. Encrypts its session cookie. At least 32 characters, or the dashboard refuses to start. |
+| `ADMIN_API_URL` | (none) | Dashboard only. Where its server reaches the admin API. Set by Docker Compose (`http://admin-api:8001`). |
 
 ### `config/gateway.yaml`
 
@@ -341,12 +422,13 @@ routes:
 |---|---|---|
 | `rpm`, `tpm`, `rpd` | no limit | Requests per minute, tokens per minute, requests per day. |
 | `timeout` | `30` | Seconds for one attempt (also bounded by the request deadline). |
+| `price` | unknown | `{ input, output }` in US dollars per million tokens. Without it, the cost of the model's answers is unknown. |
 
 See [`config/gateway.yaml`](config/gateway.yaml) for the full example.
 
 ### Usage log
 
-The `usage_log` table has one row per examined target, grouped by `request_id`: tenant, API key, alias, provider, model, outcome, status, latency, token estimate and real usage. Streamed requests have `stream = true` and `first_token_ms`, the time to the first content; `latency_ms` is the whole duration of the attempt. On aliases that use the cache, every row has `cache` (`hit`, `miss`, `bypass` or `unavailable`); a hit is one `cache_hit` row with the tokens the cache saved and its `cache_similarity`.
+The `usage_log` table has one row per examined target, grouped by `request_id`: tenant, API key, alias, provider, model, outcome, status, latency, token estimate and real usage. Streamed requests have `stream = true` and `first_token_ms`, the time to the first content; `latency_ms` is the whole duration of the attempt. On aliases that use the cache, every row has `cache` (`hit`, `miss`, `bypass` or `unavailable`); a hit is one `cache_hit` row with the tokens the cache saved and its `cache_similarity`. `cost_usd` is the cost of the row (NULL without a price or without token counts) and `saved_cost_usd` what a cache hit saved.
 
 | Outcome | Meaning |
 |---|---|
@@ -430,6 +512,14 @@ providers:
 
 **One atomic write per answer.** A Lua script checks that no answer to the same request is stored yet and that the tenant is under its entry limit, then writes the entry: identical concurrent requests keep the first answer, and the limit is never over-booked. Redis has no eviction policy set, because it could evict quota or breaker keys instead of cache entries.
 
+**The admin API in its own process, on a port nobody outside can reach.** The same code and image as the gateway, started with another command. The public surface is unchanged, a bug in an admin route or a leaked admin key cannot be used from the internet, and heavy statistics queries never slow down the chat traffic.
+
+**A backend for frontend.** The dashboard's server, not the browser, holds the admin key and calls the admin API. A script injected in the page could not steal the key, and the admin API needs no CORS.
+
+**Statistics computed from the usage log, when asked.** Direct SQL with an index on `created_at`, over 30 days at most, instead of pre-aggregated tables to keep in sync. The admin API hides how the numbers are computed, so pre-aggregation can come later without changing the dashboard.
+
+**One contract for two languages.** The dashboard's TypeScript types are generated from the admin API's OpenAPI schema, and CI fails when they are out of date: a field renamed in Python breaks the dashboard's type check, not production.
+
 **Never store prompts.** The usage log stores the prompt length only. Upstream error messages of client errors are not stored either, because some providers quote the invalid input in them.
 
 ## Development
@@ -447,9 +537,15 @@ docker run -d --rm --name gateway-test-pg -e POSTGRES_PASSWORD=test \
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 uv run mypy
+
+# Dashboard (bun installs packages and runs scripts; Node.js runs Next.js).
+cd dashboard
+bun install
+bun run lint && bun run format:check && bun run typecheck && bun run test
+bun run export:openapi && bun run generate:api   # after a change to the admin API
 ```
 
-Tests go through the HTTP API: upstream providers are mocked with [respx](https://lundberg.github.io/respx/), Redis and PostgreSQL are real. They cover failover on `429`, `5xx` and timeouts, no failover on `400`, cooldowns, circuit breaker transitions (including the half-open trial under concurrency), concurrent quota reservation, `Retry-After`, streaming (failover before the first token, interruptions, stream timeouts, client disconnects, token usage), the response cache (exact and semantic hits, isolation per tenant and alias, eligibility, streams, bypass, entry limit, failures), the deadline, degraded mode, API keys (revocation, cache, database outages), tenant quotas under concurrency, the admin command line run as a real process, and the official OpenAI SDK. CI runs the same checks on every push.
+Tests go through the HTTP API: upstream providers are mocked with [respx](https://lundberg.github.io/respx/), Redis and PostgreSQL are real. They cover failover on `429`, `5xx` and timeouts, no failover on `400`, cooldowns, circuit breaker transitions (including the half-open trial under concurrency), concurrent quota reservation, `Retry-After`, streaming (failover before the first token, interruptions, stream timeouts, client disconnects, token usage), the response cache (exact and semantic hits, isolation per tenant and alias, eligibility, streams, bypass, entry limit, failures), the deadline, degraded mode, API keys (revocation, cache, database outages), tenant quotas under concurrency, the admin command line run as a real process, the admin API (exact statistics on known rows, key separation, live state, admin actions recorded in the same transaction), and the official OpenAI SDK. The dashboard is tested with Vitest and Testing Library (session, API client, every screen). CI runs the same checks on every push.
 
 ## Limitations
 
@@ -458,6 +554,9 @@ Tests go through the HTTP API: upstream providers are mocked with [respx](https:
 - **A semantic hit answers a similar question, not the same one.** With a lower threshold, a close but different question can get a wrong answer. Keep the cache for aliases where that is acceptable, and use `bypass` or `clear-cache` to fix a wrong answer.
 - **Identical concurrent requests all call a provider.** Before the first answer is stored, each of them is a miss; only the first answer is kept.
 - **The cache needs Redis database 0**, where Redis creates its vector indexes.
+- **The dashboard is for operators only.** Tenants cannot log in to see their own usage yet.
+- **Statistics are computed on demand**, over 30 days at most. On a very large usage log, pre-aggregated tables would be faster.
+- **Costs are only as accurate as the configured prices.** Prices change: check them on each provider's pricing page.
 - **A revoked key keeps working up to 60 s** on each gateway instance, until its cache entry expires (`AUTH_CACHE_TTL`). The cache is per instance.
 - **A hanging PostgreSQL slows down authentication.** If the database accepts connections but never answers, each request whose key cache entry has expired waits `DATABASE_TIMEOUT` (5 s) before the grace period lets it through.
 - **The tenant token budget is checked against an estimate.** A request whose `max_tokens` does not fit the remaining budget is refused, even if the real answer would have been short. The error message suggests lowering `max_tokens`.
