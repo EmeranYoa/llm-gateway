@@ -237,3 +237,9 @@ async def find_key_owner(engine: AsyncEngine, key: str) -> KeyOwner | None:
     api_key_id, tenant_id, tenant_name, rpm, tokens_per_day = row
     limits = TenantLimits(rpm=rpm, tokens_per_day=tokens_per_day)
     return KeyOwner(api_key_id, tenant_id, tenant_name, limits)
+
+
+async def find_tenant_id(engine: AsyncEngine, tenant_name: str) -> int | None:
+    """Return the id of the tenant named `tenant_name`, or None when it does not exist."""
+    async with engine.connect() as connection:
+        return await connection.scalar(select(TenantRow.id).where(TenantRow.name == tenant_name))

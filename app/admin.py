@@ -1,13 +1,15 @@
-"""Admin command line: manage tenants and their gateway API keys.
+"""Admin command line: manage tenants, their gateway API keys and their cached answers.
 
 Usage:
     python -m app.admin create-key --tenant acme [--rpm 60] [--tokens-per-day 200000]
     python -m app.admin list-keys [--tenant acme]
     python -m app.admin revoke-key 12
     python -m app.admin set-limits --tenant acme [--rpm 120] [--tokens-per-day 500000]
+    python -m app.admin clear-cache --tenant acme [--alias chat-fast]
+    python -m app.admin clear-cache --all
 
 A full key is printed only once, by create-key. Other commands show a short prefix.
-It uses the same `DATABASE_URL` as the gateway.
+It uses the same `DATABASE_URL` and `REDIS_URL` as the gateway.
 """
 
 import argparse
@@ -16,13 +18,16 @@ import datetime as dt
 import sys
 from collections.abc import Sequence
 
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.cache.store import ResponseCache
 from app.config import Settings
 from app.storage.tenants import (
     ApiKeyInfo,
     Revocation,
     create_api_key,
+    find_tenant_id,
     list_api_keys,
     revoke_api_key,
     set_tenant_limits,
@@ -56,9 +61,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     set_limits.add_argument("--tenant", required=True, help="tenant name")
     _add_limit_arguments(set_limits)
 
+    clear_cache = commands.add_parser(
+        "clear-cache", help="remove cached answers of one tenant, or of every tenant"
+    )
+    scope = clear_cache.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--tenant", help="tenant name: remove only the answers of this tenant")
+    scope.add_argument("--all", action="store_true", help="remove the answers of every tenant")
+    clear_cache.add_argument("--alias", help="with --tenant: remove only the answers of this alias")
+
     args = parser.parse_args(argv)
     if args.command == "set-limits" and args.rpm is None and args.tokens_per_day is None:
         set_limits.error("give at least one limit: --rpm and/or --tokens-per-day")
+    if args.command == "clear-cache" and args.alias is not None and args.tenant is None:
+        clear_cache.error("--alias needs --tenant: an alias is cleared for one tenant")
     if args.command == "create-key":
         return asyncio.run(_create_key(args.tenant, args.rpm, args.tokens_per_day))
     if args.command == "list-keys":
@@ -67,6 +82,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_revoke_key(args.id))
     if args.command == "set-limits":
         return asyncio.run(_set_limits(args.tenant, args.rpm, args.tokens_per_day))
+    if args.command == "clear-cache":
+        return asyncio.run(_clear_cache(args.tenant, args.alias))
     return 1
 
 
@@ -133,6 +150,29 @@ async def _set_limits(tenant: str, rpm: int | None, tokens_per_day: int | None) 
     if tokens_per_day is not None:
         changes.append(f"{tokens_per_day} tokens per day")
     print(f"Limits of tenant '{tenant}' updated: {', '.join(changes)}.")
+    return 0
+
+
+async def _clear_cache(tenant: str | None, alias: str | None) -> int:
+    """Remove the cached answers of `tenant` (every tenant if None), or of one of its aliases."""
+    settings = Settings()
+    tenant_id = None
+    if tenant is not None:
+        engine = create_async_engine(settings.database_url)
+        try:
+            tenant_id = await find_tenant_id(engine, tenant)
+        finally:
+            await engine.dispose()
+        if tenant_id is None:
+            print(f"Error: unknown tenant '{tenant}'.", file=sys.stderr)
+            return 1
+    redis = Redis.from_url(settings.redis_url)
+    try:
+        # Clearing needs no alias settings: those only matter to store answers.
+        removed = await ResponseCache(redis, cached_aliases={}).clear(tenant_id, alias)
+    finally:
+        await redis.aclose()
+    print(f"Removed {removed} cached {'answer' if removed == 1 else 'answers'}.")
     return 0
 
 

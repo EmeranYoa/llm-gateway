@@ -10,6 +10,7 @@ the TTL of its alias; a hit does not extend it.
 
 import hashlib
 import json
+import re
 import struct
 import time
 import uuid
@@ -112,6 +113,36 @@ class ResponseCache:
             pipeline.pexpire(entry_key, round(self._cached_aliases[alias].ttl * 1000))
             await pipeline.execute()
 
+    async def clear(self, tenant_id: int | None, alias: str | None = None) -> int:
+        """Remove stored answers and return how many were removed.
+
+        `tenant_id` None removes the answers of every tenant; `alias` limits the
+        removal to one alias of the tenant. Only cache entries are removed, never
+        the routing or quota state kept in the same Redis.
+        """
+        if tenant_id is None:
+            if alias is not None:
+                raise ValueError("an alias can only be cleared for one tenant")
+            pattern = "cache:*"
+        elif alias is None:
+            pattern = f"cache:{tenant_id}:*"
+        else:
+            pattern = f"cache:{tenant_id}:{_escape_pattern(alias)}:*"
+        removed = 0
+        batch: list[bytes] = []
+        # SCAN walks the keys in small steps, so a large cache never blocks Redis
+        # the way KEYS would. Keys are checked again in Python: an alias may
+        # contain ":", and clearing `chat` must keep the entries of `chat:x`.
+        async for key in self._redis.scan_iter(match=pattern, count=_CLEAR_BATCH_SIZE):
+            if _is_entry_key(key, tenant_id, alias):
+                batch.append(key)
+            if len(batch) >= _CLEAR_BATCH_SIZE:
+                removed += await self._redis.delete(*batch)
+                batch.clear()
+        if batch:
+            removed += await self._redis.delete(*batch)
+        return removed
+
     def _embeds(self, question: str | None) -> bool:
         """True when `question` is compared by meaning (not too long for the embedding model)."""
         return (
@@ -202,3 +233,25 @@ def _entry_key(tenant_id: int, alias: str, key: RequestKey) -> str:
 def _packed(vector: list[float]) -> bytes:
     """The vector as Redis vector search reads it: little-endian 32-bit floats."""
     return struct.pack(f"<{len(vector)}f", *vector)
+
+
+# Keys removed per DEL command, and keys asked per SCAN step, by `ResponseCache.clear`.
+_CLEAR_BATCH_SIZE = 500
+
+# `cache:{tenant_id}:{alias}:{exact_hash}`; the alias may itself contain ":".
+_ENTRY_KEY = re.compile(rb"cache:(\d+):(.+):[0-9a-f]{64}", re.DOTALL)
+
+
+def _is_entry_key(key: bytes, tenant_id: int | None, alias: str | None) -> bool:
+    """True when `key` is a cache entry of `tenant_id` (any tenant if None) and `alias`."""
+    match = _ENTRY_KEY.fullmatch(key)
+    if match is None:
+        return False
+    if tenant_id is not None and int(match[1]) != tenant_id:
+        return False
+    return alias is None or match[2] == alias.encode()
+
+
+def _escape_pattern(text: str) -> str:
+    """Escape the characters that have a meaning in a Redis SCAN pattern."""
+    return "".join(f"\\{char}" if char in "*?[]\\" else char for char in text)
