@@ -112,9 +112,13 @@ export function formatAge(seconds: number): string {
 
 /**
  * A moment returned by the admin API (ISO 8601, UTC) in a given time zone:
- * `Oct 23, 2026, 14:05`.
+ * `Oct 23, 2026, 14:05`, or `Oct 23, 2026, 14:05:09` with `seconds`.
  */
-export function formatDateTime(iso: string, timeZone: string): string {
+export function formatDateTime(
+  iso: string,
+  timeZone: string,
+  { seconds = false }: { seconds?: boolean } = {},
+): string {
   return new Intl.DateTimeFormat(LOCALE, {
     timeZone,
     year: "numeric",
@@ -122,6 +126,7 @@ export function formatDateTime(iso: string, timeZone: string): string {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    second: seconds ? "2-digit" : undefined,
     hourCycle: "h23",
   }).format(new Date(iso));
 }
@@ -151,4 +156,26 @@ export function formatBucket(
     month: "short",
     day: "numeric",
   }).format(new Date(iso));
+}
+
+/**
+ * How much of a quota is used: `12 / 30`.
+ * No limit gives `no limit`; an unknown use (Redis down) gives `unknown / 30`.
+ */
+export function formatQuota(used: number | null, limit: number | null): string {
+  if (limit === null) {
+    return "no limit";
+  }
+  const shown = used === null ? "unknown" : formatCount(used);
+  return `${shown} / ${formatCount(limit)}`;
+}
+
+/** A cosine similarity between 0 and 1, with up to 3 decimals: `0.973`, `1`. */
+export function formatSimilarity(value: number | null): string {
+  if (value === null) {
+    return NO_VALUE;
+  }
+  return new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 3 }).format(
+    value,
+  );
 }

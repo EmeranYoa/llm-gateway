@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { logout } from "@/lib/auth-actions";
 
-/** The screens of the dashboard. Pages not built yet show a placeholder. */
+/** The screens of the dashboard. */
 const LINKS = [
   { href: "/", label: "Overview" },
   { href: "/tenants", label: "Tenants" },

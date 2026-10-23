@@ -8,7 +8,9 @@ import {
   formatDuration,
   formatMoney,
   formatMoneyTick,
+  formatQuota,
   formatRate,
+  formatSimilarity,
 } from "./format";
 
 describe("formatMoney", () => {
@@ -101,6 +103,32 @@ describe("formatDateTime", () => {
     expect(formatDateTime("2026-10-23T23:30:00Z", "Africa/Douala")).toBe(
       "Oct 24, 2026, 00:30",
     );
+  });
+
+  it("adds the seconds when asked", () => {
+    expect(
+      formatDateTime("2026-10-23T13:05:09Z", "UTC", { seconds: true }),
+    ).toBe("Oct 23, 2026, 13:05:09");
+  });
+});
+
+describe("formatQuota", () => {
+  it("shows the use against the limit", () => {
+    expect(formatQuota(12, 30)).toBe("12 / 30");
+    expect(formatQuota(1500, 8000)).toBe("1,500 / 8,000");
+  });
+
+  it("says when there is no limit, or when the use is unknown", () => {
+    expect(formatQuota(null, null)).toBe("no limit");
+    expect(formatQuota(null, 30)).toBe("unknown / 30");
+  });
+});
+
+describe("formatSimilarity", () => {
+  it("keeps up to three decimals", () => {
+    expect(formatSimilarity(0.97345)).toBe("0.973");
+    expect(formatSimilarity(1)).toBe("1");
+    expect(formatSimilarity(null)).toBe("n/a");
   });
 });
 

@@ -3,6 +3,7 @@ import "server-only";
 import { redirect } from "next/navigation";
 
 import { readDashboardConfig } from "@/lib/config";
+import { type RequestFilters, requestListQuery } from "@/lib/request-filters";
 import { getSession } from "@/lib/session";
 
 import type { Period } from "@/lib/period";
@@ -24,6 +25,12 @@ export type SeriesPoint = components["schemas"]["SeriesPoint"];
 export type TenantStatisticsList =
   components["schemas"]["TenantStatisticsList"];
 export type TenantStatistics = components["schemas"]["TenantStatistics"];
+export type TargetsReport = components["schemas"]["TargetsReport"];
+export type TargetReport = components["schemas"]["TargetReport"];
+export type RequestPage = components["schemas"]["RequestPage"];
+export type RequestSummary = components["schemas"]["RequestSummary"];
+export type RequestDetail = components["schemas"]["RequestDetail"];
+export type RoutingStep = components["schemas"]["RoutingStep"];
 
 /** Where to send the operator when the admin API refuses the key of the session. */
 export const SESSION_EXPIRED_PATH = "/session-expired";
@@ -85,6 +92,41 @@ export async function getTenantStatistics(
 ): Promise<TenantStatisticsList> {
   const query = new URLSearchParams({ period });
   return callWithSession<TenantStatisticsList>(`/admin/v1/tenants?${query}`);
+}
+
+/**
+ * Statistics of every target (provider/model) over the period, and its live
+ * state in Redis: cooldown, circuit breaker and used quotas.
+ */
+export async function getTargets(period: Period): Promise<TargetsReport> {
+  const query = new URLSearchParams({ period });
+  return callWithSession<TargetsReport>(`/admin/v1/targets?${query}`);
+}
+
+/**
+ * One page of requests (50), newest first. `cursor` is the `next_cursor` of the
+ * previous page, or null for the first page.
+ *
+ * An invalid cursor raises an `AdminApiError` with status 400 (`invalid_cursor`).
+ */
+export async function listRequests(
+  filters: RequestFilters,
+  cursor: string | null,
+): Promise<RequestPage> {
+  // The admin API takes the same params as the URL of the Requests screen.
+  const query = requestListQuery(filters, cursor);
+  return callWithSession<RequestPage>(`/admin/v1/requests?${query}`);
+}
+
+/**
+ * One request and its routing path.
+ *
+ * An unknown id raises an `AdminApiError` with status 404 (`request_not_found`).
+ */
+export async function getRequest(requestId: string): Promise<RequestDetail> {
+  return callWithSession<RequestDetail>(
+    `/admin/v1/requests/${encodeURIComponent(requestId)}`,
+  );
 }
 
 /**

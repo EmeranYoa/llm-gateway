@@ -5,8 +5,11 @@ import {
   checkAdminKey,
   getMe,
   getOverview,
+  getRequest,
+  getTargets,
   getTenantStatistics,
   keepApiError,
+  listRequests,
 } from "./client";
 
 const session = vi.hoisted(() => ({
@@ -195,6 +198,97 @@ describe("getTenantStatistics", () => {
 
     const [url] = fetchMock.mock.calls[0] as unknown as [string];
     expect(url).toBe("http://admin-api.test:8001/admin/v1/tenants?period=30d");
+  });
+});
+
+describe("getTargets", () => {
+  it("asks for the period", async () => {
+    const fetchMock = stubFetch(jsonResponse(200, { targets: [] }));
+
+    await expect(getTargets("7d")).resolves.toEqual({ targets: [] });
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe("http://admin-api.test:8001/admin/v1/targets?period=7d");
+  });
+});
+
+describe("listRequests", () => {
+  const noFilter = {
+    period: "24h",
+    tenant: null,
+    alias: null,
+    status: null,
+  } as const;
+
+  it("asks for the period only when there is no other filter", async () => {
+    const page = { items: [], next_cursor: null };
+    const fetchMock = stubFetch(jsonResponse(200, page));
+
+    await expect(listRequests(noFilter, null)).resolves.toEqual(page);
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe("http://admin-api.test:8001/admin/v1/requests?period=24h");
+  });
+
+  it("sends every filter and the cursor, encoded", async () => {
+    const fetchMock = stubFetch(jsonResponse(200, {}));
+
+    await listRequests(
+      {
+        period: "30d",
+        tenant: "acme & co",
+        alias: "chat/fast",
+        status: "client_error",
+      },
+      "MjAyNi0xMC0yMyByZXEtMQ==",
+    );
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe(
+      "http://admin-api.test:8001/admin/v1/requests?period=30d&tenant=acme+%26+co&alias=chat%2Ffast&status=client_error&cursor=MjAyNi0xMC0yMyByZXEtMQ%3D%3D",
+    );
+  });
+
+  it("raises the error of an invalid cursor", async () => {
+    stubFetch(
+      jsonResponse(400, {
+        error: { message: "Invalid cursor.", code: "invalid_cursor" },
+      }),
+    );
+
+    await expect(listRequests(noFilter, "nope")).rejects.toMatchObject({
+      status: 400,
+      code: "invalid_cursor",
+    });
+  });
+});
+
+describe("getRequest", () => {
+  it("asks for one request, with its id encoded", async () => {
+    const fetchMock = stubFetch(jsonResponse(200, { request_id: "a/b?c" }));
+
+    await expect(getRequest("a/b?c")).resolves.toEqual({
+      request_id: "a/b?c",
+    });
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe("http://admin-api.test:8001/admin/v1/requests/a%2Fb%3Fc");
+  });
+
+  it("raises a 404 for an unknown request", async () => {
+    stubFetch(
+      jsonResponse(404, {
+        error: {
+          message: "No request with this id.",
+          code: "request_not_found",
+        },
+      }),
+    );
+
+    await expect(getRequest("nope")).rejects.toMatchObject({
+      status: 404,
+      code: "request_not_found",
+    });
   });
 });
 

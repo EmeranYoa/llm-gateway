@@ -4,7 +4,12 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useId } from "react";
 
 import { type Period, PERIOD_LABELS, PERIODS } from "@/lib/period";
-import { withSearchParam } from "@/lib/search-params";
+import {
+  REQUEST_STATUS_LABELS,
+  REQUEST_STATUSES,
+  type RequestStatus,
+} from "@/lib/request-filters";
+import { CURSOR_PARAM, withSearchParam } from "@/lib/search-params";
 
 /**
  * Filters of a screen, kept in the URL search params (`?period=7d&tenant=acme`):
@@ -13,13 +18,18 @@ import { withSearchParam } from "@/lib/search-params";
  * The current value comes from the server page, which applies the defaults.
  */
 
-/** Navigate to the current page with one search param changed, the others kept. */
+/**
+ * Navigate to the current page with one search param changed, the others kept.
+ * The page cursor of a paged list is removed: new filters start from the first page.
+ */
 function useSetSearchParam(): (key: string, value: string | null) => void {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   return (key, value) => {
-    const query = withSearchParam(searchParams.toString(), key, value);
+    const current = new URLSearchParams(searchParams.toString());
+    current.delete(CURSOR_PARAM);
+    const query = withSearchParam(current, key, value);
     router.push(`${pathname}${query}`, { scroll: false });
   };
 }
@@ -96,5 +106,86 @@ export function TenantFilter({ value, tenants }: TenantFilterProps) {
       ]}
       onChange={(tenant) => setSearchParam("tenant", tenant || null)}
     />
+  );
+}
+
+const ALL_STATUSES = "";
+
+/** Choose the status of the requests: writes `?status=failed`, or removes it for all. */
+export function RequestStatusFilter({
+  value,
+}: {
+  /** The selected status, or null for every status. */
+  value: RequestStatus | null;
+}) {
+  const setSearchParam = useSetSearchParam();
+  return (
+    <SelectFilter
+      label="Status"
+      value={value ?? ALL_STATUSES}
+      options={[
+        { value: ALL_STATUSES, label: "All statuses" },
+        ...REQUEST_STATUSES.map((status) => ({
+          value: status,
+          label: REQUEST_STATUS_LABELS[status],
+        })),
+      ]}
+      onChange={(status) => setSearchParam("status", status || null)}
+    />
+  );
+}
+
+type AliasFilterProps = {
+  /** The selected alias, or null for every alias. */
+  value: string | null;
+  /** Aliases to suggest while typing (the admin API has no list of aliases). */
+  suggestions: string[];
+};
+
+/**
+ * Type a model alias: writes `?alias=<name>` when the form is sent, or removes
+ * it when the field is empty. Any alias can be typed; `suggestions` only help.
+ */
+export function AliasFilter({ value, suggestions }: AliasFilterProps) {
+  const setSearchParam = useSetSearchParam();
+  const id = useId();
+  const listId = `${id}-aliases`;
+  return (
+    <form
+      role="search"
+      aria-label="Alias filter"
+      className="flex items-center gap-2 text-sm"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const typed = new FormData(event.currentTarget).get("alias");
+        setSearchParam("alias", String(typed ?? "").trim() || null);
+      }}
+    >
+      <label htmlFor={id} className="text-slate-600">
+        Alias
+      </label>
+      <input
+        // A new value from the server (back button, cleared filter) resets the field.
+        key={value ?? ""}
+        id={id}
+        name="alias"
+        type="search"
+        defaultValue={value ?? ""}
+        list={listId}
+        placeholder="All aliases"
+        className="w-36 rounded border border-slate-300 bg-white px-2 py-1 text-slate-900 focus:ring-2 focus:ring-sky-600 focus:outline-none"
+      />
+      <datalist id={listId}>
+        {[...new Set(suggestions)].sort().map((alias) => (
+          <option key={alias} value={alias} />
+        ))}
+      </datalist>
+      <button
+        type="submit"
+        className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 hover:bg-slate-100 focus:ring-2 focus:ring-sky-600 focus:outline-none"
+      >
+        Apply
+      </button>
+    </form>
   );
 }

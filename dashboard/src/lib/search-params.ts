@@ -4,6 +4,13 @@
  */
 
 /**
+ * The search param that carries the position in a paged list (`next_cursor`
+ * of the admin API). Changing a filter removes it: the list starts again from
+ * its first page.
+ */
+export const CURSOR_PARAM = "cursor";
+
+/**
  * The query string after setting `key` to `value`, other params kept.
  * A null or empty `value` removes the param. Returns `""` or `"?a=b&c=d"`.
  */

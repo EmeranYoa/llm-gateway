@@ -8,10 +8,21 @@ import { formatDateTime } from "@/lib/format";
  * render they show in UTC, then switch to the browser's zone once loaded.
  */
 
-/** A moment (ISO 8601) in the browser's time zone, in a `<time>` element. */
-export function LocalDateTime({ iso }: { iso: string }) {
+/**
+ * A moment (ISO 8601) in the browser's time zone, in a `<time>` element.
+ * `seconds` adds the seconds, for short events such as a request or a cooldown.
+ */
+export function LocalDateTime({
+  iso,
+  seconds = false,
+}: {
+  iso: string;
+  seconds?: boolean;
+}) {
   const timeZone = useBrowserTimeZone();
-  return <time dateTime={iso}>{formatDateTime(iso, timeZone)}</time>;
+  return (
+    <time dateTime={iso}>{formatDateTime(iso, timeZone, { seconds })}</time>
+  );
 }
 
 /** Names the time zone the screen uses: "Times in Africa/Douala". */

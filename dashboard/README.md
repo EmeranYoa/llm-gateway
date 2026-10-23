@@ -27,23 +27,38 @@ Redis itself.
   per UTC day (7d, 30d). Each figure has a tooltip with its exact definition.
 - **Tenants** (`/tenants`): one row per tenant. A row opens the overview of that
   tenant for the same period.
+- **Providers & models** (`/providers`): one card per target (provider/model).
+  Status badges say why traffic goes there or elsewhere right now (healthy,
+  cooling down, breaker open or half-open, quota full, live state unavailable,
+  no longer configured). Each card has the statistics of the period (calls,
+  success rate, latency, failures and skips by reason) and the live state from
+  Redis (cooldown, circuit breaker, RPM, TPM and RPD used against their limits).
+- **Requests** (`/requests`): the requests of the period, newest first, 50 per
+  page, filtered by tenant, alias and status. "Older requests" opens the next
+  page. A row opens the **request detail** (`/requests/<id>`): its summary and
+  its routing path, one step per target examined, with outcome, status code,
+  latency, tokens, cost and cache.
 
 Filters live in the URL (`/?period=7d&tenant=acme`), so a view can be bookmarked.
-Both screens reload their data every 10 s without a visible reload. Times come
-from the admin API in UTC and are shown in the browser's time zone.
+Changing a filter goes back to the first page of a list. Screens reload their
+data every 10 s without a visible reload, except older pages of requests and the
+request detail. Times come from the admin API in UTC and are shown in the
+browser's time zone.
 
 ## Building blocks for screens
 
 Reuse these when you add a screen:
 
-| Piece                                                                        | What it does                                                                                                                                                                                                                                                                                                 |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `AutoRefresh` (`components/auto-refresh.tsx`)                                | Wraps the data of a server page. Props: `updatedAt` (ISO), `failed`, `dataKey` (the filters), `intervalMs` (default 10 s). Calls `router.refresh()`, shows "Updated N s ago" and a pause button, pauses while the tab is hidden, and keeps the last data with an "Update failed" badge when a refresh fails. |
-| `PeriodFilter`, `TenantFilter` (`components/filters.tsx`)                    | Write `?period=` and `?tenant=` to the URL, other params kept. Props: `value` (from the server page), and `tenants` (names) for `TenantFilter`. Parse the params with `parsePeriod` / `parseTenant` (`lib/period.ts`).                                                                                       |
-| `StatCard` (`components/stat-card.tsx`)                                      | One figure. Props: `label`, `value` (formatted), `definition` (tooltip), optional `detail` and `warning`. Definitions live in `lib/definitions.ts`.                                                                                                                                                          |
-| `BarChartCard` (`components/bar-chart-card.tsx`)                             | A titled Recharts bar chart. Props: `title`, `data` (`label`, `tooltipLabel`, one value per series), `series` (`key`, `name`, `color`), `formatValue`, optional `formatTick`, `note` and `integer`. Animates on the first render only.                                                                       |
-| `LocalDateTime`, `TimeZoneName`, `PeriodRange` (`components/local-time.tsx`) | Show UTC times of the admin API in the browser's time zone, and name it.                                                                                                                                                                                                                                     |
-| `lib/format.ts`                                                              | `formatMoney` (`null` → `unknown`), `formatMoneyTick`, `formatRate`, `formatDuration` (`null` → `n/a`), `formatCount`, `formatAge`, `formatDateTime`, `formatBucket`. English (`en-US`) everywhere, so server and browser agree.                                                                             |
+| Piece                                                                        | What it does                                                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AutoRefresh` (`components/auto-refresh.tsx`)                                | Wraps the data of a server page. Props: `updatedAt` (ISO), `failed`, `dataKey` (the filters), `intervalMs` (default 10 s). Calls `router.refresh()`, shows "Updated N s ago" and a pause button, pauses while the tab is hidden, and keeps the last data with an "Update failed" badge when a refresh fails.   |
+| `PeriodFilter`, `TenantFilter` (`components/filters.tsx`)                    | Write `?period=` and `?tenant=` to the URL, other params kept. Props: `value` (from the server page), and `tenants` (names) for `TenantFilter`. Parse the params with `parsePeriod` / `parseTenant` (`lib/period.ts`).                                                                                         |
+| `RequestStatusFilter`, `AliasFilter` (`components/filters.tsx`)              | Write `?status=` and `?alias=`. Every filter removes `?cursor=`, so a list starts again from its first page. Parse the params of the Requests screen with `parseRequestFilters` (`lib/request-filters.ts`), which also builds the links (`requestsHref`, `requestHref`).                                       |
+| `Badge` (`components/badge.tsx`)                                             | A short coloured label with a tooltip (`tone`, `title`). The text always says what the colour means.                                                                                                                                                                                                           |
+| `StatCard` (`components/stat-card.tsx`)                                      | One figure. Props: `label`, `value` (formatted), `definition` (tooltip), optional `detail` and `warning`. Definitions live in `lib/definitions.ts`.                                                                                                                                                            |
+| `BarChartCard` (`components/bar-chart-card.tsx`)                             | A titled Recharts bar chart. Props: `title`, `data` (`label`, `tooltipLabel`, one value per series), `series` (`key`, `name`, `color`), `formatValue`, optional `formatTick`, `note` and `integer`. Animates on the first render only.                                                                         |
+| `LocalDateTime`, `TimeZoneName`, `PeriodRange` (`components/local-time.tsx`) | Show UTC times of the admin API in the browser's time zone (`seconds` prop for short events), and name it.                                                                                                                                                                                                     |
+| `lib/format.ts`                                                              | `formatMoney` (`null` → `unknown`), `formatMoneyTick`, `formatRate`, `formatDuration` (`null` → `n/a`), `formatCount`, `formatAge`, `formatDateTime` (optional seconds), `formatBucket`, `formatQuota` (`12 / 30`, `no limit`), `formatSimilarity`. English (`en-US`) everywhere, so server and browser agree. |
 
 A server page loads its data with `src/api/client.ts`, turns an `AdminApiError`
 into a value with `.catch(keepApiError)`, and passes the result to `AutoRefresh`
