@@ -14,6 +14,7 @@ const LINKS = [
   { href: "/providers", label: "nav.providers" },
   { href: "/requests", label: "nav.requests" },
   { href: "/keys", label: "nav.keys" },
+  { href: "/operators", label: "operators.nav" },
 ] as const;
 
 export function NavBar({ locale }: { locale: Locale }) {

@@ -116,7 +116,7 @@ export function checkRecoveryForm(form: FormData): Checked<RecoveryRequest> {
  * A new password typed twice: both filled, equal, and long enough. Passwords
  * are never trimmed: a space is a character like any other.
  */
-function checkNewPassword(
+export function checkNewPassword(
   form: FormData,
   field: string,
   againField: string,
@@ -141,6 +141,10 @@ function text(form: FormData, name: string): string {
   return typeof value === "string" ? value : "";
 }
 
-function refused(problem: FormProblem): { ok: false; error: AuthFormError } {
+/** A form refused before calling the admin API. */
+export function refused(problem: FormProblem): {
+  ok: false;
+  error: AuthFormError;
+} {
   return { ok: false, error: { kind: "form", problem } };
 }

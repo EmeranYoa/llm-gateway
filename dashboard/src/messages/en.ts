@@ -88,6 +88,7 @@ export const en = {
         "The admin API cannot be reached. Check that it is running.",
       authentication_unavailable:
         "Sign-in cannot be checked right now. Try again later.",
+      cannot_disable_self: "You cannot disable your own account.",
       database_unavailable: "The database is unavailable. Try again later.",
       invalid_credentials: "Wrong username or password.",
       invalid_cursor:
@@ -101,7 +102,10 @@ export const en = {
         "Wrong setup token. Copy it again from the admin API logs.",
       key_already_revoked: "This API key is already revoked.",
       key_not_found: "This API key does not exist.",
-      operator_not_found: "No operator account has this username.",
+      last_enabled_operator:
+        "This is the last enabled account: it cannot be disabled, or nobody could sign in.",
+      operator_exists: "An operator account with this username exists already.",
+      operator_not_found: "This operator account does not exist.",
       password_change_required: "Change your password to continue.",
       reauthentication_failed: "The current password is wrong.",
       recovery_disabled:
@@ -113,6 +117,75 @@ export const en = {
       setup_closed: "The first account exists already. Sign in instead.",
       tenant_not_found: "This tenant does not exist.",
       too_many_attempts: "Too many sign-in attempts. Try again later.",
+      use_own_password_change:
+        "To change your own password, use “Change my password”.",
+    },
+  },
+  /** The Operators screen: the accounts that can sign in to the dashboard. */
+  operators: {
+    nav: "Operators",
+    title: "Operators",
+    intro:
+      "The accounts that can sign in to this dashboard. Every change asks for your current password again.",
+    listTitle: "Accounts",
+    timeZone: "Last sign-in times in {zone}.",
+    empty: "No operator account.",
+    columns: {
+      username: "Username",
+      status: "Status",
+      lastSignIn: "Last sign-in",
+      actions: "Actions",
+    },
+    you: "you",
+    enabled: "Enabled",
+    enabledHint: "Can sign in.",
+    disabled: "Disabled",
+    disabledHint: "Cannot sign in until the account is enabled again.",
+    mustChangePassword: "Must change password",
+    mustChangePasswordHint:
+      "Must choose a new password at the next sign-in, before anything else.",
+    neverSignedIn: "never",
+    currentPassword: "Your current password",
+    currentPasswordHint: "Confirms that you are the one making this change.",
+    cancel: "Cancel",
+    create: {
+      title: "Create an account",
+      note: "The new operator must change this password at their first sign-in. Give it to them through a safe channel.",
+      submit: "Create the account",
+      done: "Account {username} created.",
+    },
+    reset: {
+      open: "Reset password",
+      openLabel: "Reset the password of {username}",
+      title: "New password for {username}",
+      description:
+        "They must change it at their next sign-in. Their open sessions are closed at once.",
+      submit: "Reset the password",
+      done: "The password of {username} is reset. They must change it at their next sign-in.",
+    },
+    disable: {
+      open: "Disable",
+      openLabel: "Disable {username}",
+      title: "Disable {username}?",
+      description:
+        "They can no longer sign in, and their open sessions are closed at once. You can enable the account again later.",
+      submit: "Disable the account",
+      done: "{username} is disabled.",
+    },
+    enable: {
+      open: "Enable",
+      openLabel: "Enable {username}",
+      title: "Enable {username}",
+      description: "They can sign in again with their password.",
+      submit: "Enable the account",
+      done: "{username} is enabled.",
+    },
+    own: {
+      title: "Change my password",
+      intro:
+        "Your other sessions are closed when the password changes; this one stays open.",
+      submit: "Change my password",
+      done: "Your password is changed. Your other sessions are closed.",
     },
   },
   format: {

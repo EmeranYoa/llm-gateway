@@ -83,6 +83,7 @@ export const fr: Messages = {
         "L’API d’administration est injoignable. Vérifiez qu’elle est démarrée.",
       authentication_unavailable:
         "Impossible de vérifier la connexion pour l’instant. Réessayez plus tard.",
+      cannot_disable_self: "Vous ne pouvez pas désactiver votre propre compte.",
       database_unavailable:
         "La base de données est indisponible. Réessayez plus tard.",
       invalid_credentials: "Nom d’utilisateur ou mot de passe incorrect.",
@@ -97,7 +98,10 @@ export const fr: Messages = {
         "Jeton de configuration incorrect. Recopiez-le depuis les logs de l’API d’administration.",
       key_already_revoked: "Cette clé d’API est déjà révoquée.",
       key_not_found: "Cette clé d’API n’existe pas.",
-      operator_not_found: "Aucun compte d’opérateur n’a ce nom d’utilisateur.",
+      last_enabled_operator:
+        "C’est le dernier compte actif : le désactiver empêcherait toute connexion.",
+      operator_exists: "Un compte d’opérateur porte déjà ce nom d’utilisateur.",
+      operator_not_found: "Ce compte d’opérateur n’existe pas.",
       password_change_required: "Changez votre mot de passe pour continuer.",
       reauthentication_failed: "Le mot de passe actuel est incorrect.",
       recovery_disabled:
@@ -110,6 +114,76 @@ export const fr: Messages = {
       tenant_not_found: "Ce tenant n’existe pas.",
       too_many_attempts:
         "Trop de tentatives de connexion. Réessayez plus tard.",
+      use_own_password_change:
+        "Pour changer votre propre mot de passe, utilisez « Changer mon mot de passe ».",
+    },
+  },
+  operators: {
+    nav: "Opérateurs",
+    title: "Opérateurs",
+    intro:
+      "Les comptes qui peuvent se connecter à ce tableau de bord. Chaque modification redemande votre mot de passe actuel.",
+    listTitle: "Comptes",
+    timeZone: "Heures de dernière connexion en {zone}.",
+    empty: "Aucun compte d’opérateur.",
+    columns: {
+      username: "Nom d’utilisateur",
+      status: "État",
+      lastSignIn: "Dernière connexion",
+      actions: "Actions",
+    },
+    you: "vous",
+    enabled: "Actif",
+    enabledHint: "Peut se connecter.",
+    disabled: "Désactivé",
+    disabledHint:
+      "Ne peut plus se connecter tant que le compte n’est pas réactivé.",
+    mustChangePassword: "Doit changer de mot de passe",
+    mustChangePasswordHint:
+      "Devra choisir un nouveau mot de passe à la prochaine connexion, avant toute autre action.",
+    neverSignedIn: "jamais",
+    currentPassword: "Votre mot de passe actuel",
+    currentPasswordHint:
+      "Confirme que c’est bien vous qui faites cette modification.",
+    cancel: "Annuler",
+    create: {
+      title: "Créer un compte",
+      note: "Le nouvel opérateur devra changer ce mot de passe à sa première connexion. Transmettez-le-lui par un canal sûr.",
+      submit: "Créer le compte",
+      done: "Compte {username} créé.",
+    },
+    reset: {
+      open: "Réinitialiser le mot de passe",
+      openLabel: "Réinitialiser le mot de passe de {username}",
+      title: "Nouveau mot de passe pour {username}",
+      description:
+        "Il devra le changer à sa prochaine connexion. Ses sessions ouvertes sont fermées immédiatement.",
+      submit: "Réinitialiser le mot de passe",
+      done: "Le mot de passe de {username} est réinitialisé. Il devra le changer à sa prochaine connexion.",
+    },
+    disable: {
+      open: "Désactiver",
+      openLabel: "Désactiver {username}",
+      title: "Désactiver {username} ?",
+      description:
+        "Il ne pourra plus se connecter, et ses sessions ouvertes sont fermées immédiatement. Vous pourrez réactiver le compte plus tard.",
+      submit: "Désactiver le compte",
+      done: "{username} est désactivé.",
+    },
+    enable: {
+      open: "Réactiver",
+      openLabel: "Réactiver {username}",
+      title: "Réactiver {username}",
+      description: "Il pourra de nouveau se connecter avec son mot de passe.",
+      submit: "Réactiver le compte",
+      done: "{username} est réactivé.",
+    },
+    own: {
+      title: "Changer mon mot de passe",
+      intro:
+        "Vos autres sessions sont fermées quand le mot de passe change ; celle-ci reste ouverte.",
+      submit: "Changer mon mot de passe",
+      done: "Votre mot de passe est changé. Vos autres sessions sont fermées.",
     },
   },
   format: {

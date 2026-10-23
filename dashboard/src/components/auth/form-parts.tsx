@@ -17,6 +17,8 @@ type FieldProps = {
   hint?: React.ReactNode;
   /** Secrets typed from a log line: monospace, no spell check. */
   monospace?: boolean;
+  /** Start of the input id: set it when several forms of a page share field names. */
+  idPrefix?: string;
 };
 
 export function Field({
@@ -26,8 +28,9 @@ export function Field({
   autoComplete,
   hint,
   monospace = false,
+  idPrefix = "auth",
 }: FieldProps) {
-  const id = `auth-${name}`;
+  const id = `${idPrefix}-${name}`;
   const hintId = `${id}-hint`;
   return (
     <div className="flex flex-col gap-1">

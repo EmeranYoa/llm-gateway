@@ -42,6 +42,10 @@ describe("NavBar", () => {
     render(<NavBar locale="en" />);
 
     expect(screen.getByRole("link", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Operators" })).toHaveAttribute(
+      "href",
+      "/operators",
+    );
     expect(screen.getByLabelText("Language")).toHaveValue("en");
   });
 });

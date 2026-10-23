@@ -56,6 +56,13 @@ Redis itself.
   page. A row opens the **request detail** (`/requests/<id>`): its summary and
   its routing path, one step per target examined, with outcome, status code,
   latency, tokens, cost and cache.
+- **Operators** (`/operators`): the operator accounts (you, enabled or
+  disabled, must change password, last sign-in), and forms to create an
+  account, reset another operator's password, disable or enable an account, and
+  change your own password. Each form asks for your current password again.
+  No action is offered on your own account except the password change, and
+  disable is hidden for the last enabled account. This screen does not refresh
+  by itself; each action reloads it.
 
 Filters live in the URL (`/?period=7d&tenant=acme`), so a view can be bookmarked.
 Changing a filter goes back to the first page of a list. Screens reload their
