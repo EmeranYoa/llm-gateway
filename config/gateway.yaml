@@ -27,6 +27,20 @@ tenants:
     rpm: 60 # requests per minute, sliding 60 s window; failed requests count too
     tokens_per_day: 500000 # prompt + completion tokens, reset every day at 00:00 UTC
 
+# Response cache: repeated or rephrased questions answered without calling a provider.
+# To enable it, start Ollama and download the embedding model once:
+#   docker compose --profile ollama up -d
+#   docker compose exec ollama ollama pull nomic-embed-text
+# then uncomment this section and restart the gateway.
+# cache:
+#   embedding: { provider: ollama, model: nomic-embed-text, timeout: 1 }
+#   similarity_threshold: 0.95 # cosine similarity for a rephrased question to be a hit
+#   ttl: 86400 # seconds an answer is kept
+#   max_semantic_chars: 2000 # longer questions only get exact hits
+#   max_entries_per_tenant: 10000
+#   aliases: # only these aliases use the cache
+#     chat-fast: {}
+
 providers:
   # https://console.groq.com/docs/rate-limits (free plan)
   groq:

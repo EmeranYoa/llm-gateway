@@ -19,6 +19,7 @@ Free LLM tiers are generous but fragile. Each provider has its own small limits 
 - **Quotas.** It tracks RPM, TPM and RPD per target in Redis, and never sends a call that would exceed them.
 - **Automatic failover.** On a `429`, a `5xx`, a timeout or a bad API key, it moves on to the next target. On a real client error (`400`), it answers at once instead of wasting quota on every provider.
 - **Streaming.** `stream: true` returns Server-Sent Events in OpenAI format. The gateway still fails over until the first token, then relays the stream as it comes.
+- **Semantic cache.** On the aliases you choose, a repeated or rephrased question is answered from Redis in milliseconds, without calling any provider. Each tenant has its own cache.
 - **Cooldown and circuit breaker.** Rate-limited targets are skipped for the delay the provider asks for; unstable targets are skipped by a circuit breaker.
 - **Shared state.** Quotas, cooldowns and breakers live in Redis, so several gateway instances share them.
 - **Degraded mode.** If Redis goes down, the gateway keeps routing (without quota checks) instead of failing.
@@ -32,14 +33,17 @@ flowchart LR
 
     subgraph gateway["LLM Gateway (FastAPI)"]
         auth["Authenticator<br/>API key, cached 60 s"] --> tenant["TenantGate<br/>tenant RPM and<br/>daily token budget"]
-        tenant --> router["Router<br/>failover loop, deadline"]
+        tenant --> cache["ResponseCache<br/>exact, then semantic lookup"]
+        cache -->|"miss"| router["Router<br/>failover loop, deadline"]
         router --> gate["TargetGate<br/>Lua scripts"]
         router --> adapter["OpenAI-compatible<br/>provider adapter"]
     end
 
     auth <-->|"tenants, api_keys"| pg
     tenant <-->|"acquire_tenant<br/>(atomic)"| redis
-    gate <-->|"acquire_target / record_outcome<br/>(atomic)"| redis[("Redis<br/>quotas, cooldowns,<br/>circuit breakers")]
+    gate <-->|"acquire_target / record_outcome<br/>(atomic)"| redis[("Redis 8<br/>quotas, cooldowns,<br/>circuit breakers,<br/>cached answers")]
+    cache <-->|"entries, vector search"| redis
+    cache -->|"embeddings"| ollama
     adapter --> groq["Groq"]
     adapter --> gemini["Gemini"]
     adapter --> openrouter["OpenRouter"]
@@ -75,6 +79,7 @@ flowchart TD
 | `app/routing/streaming.py` | A stream after its first content: idle timeout, maximum duration, token usage |
 | `app/routing/acquisition.py` + `app/routing/lua/` | Atomic Redis scripts: tenant quotas, cooldown, circuit breaker, provider quota reservation |
 | `app/routing/quotas.py` | Token estimate, provider daily reset time |
+| `app/cache/` | Response cache: request keys, eligibility rules, embedding client, Redis store with vector search, replay of a cached answer as a stream |
 | `app/providers/` | Provider interface and the generic OpenAI-compatible adapter |
 | `app/storage/` | Tenants, API keys and usage log (SQLAlchemy async, Alembic migrations in `migrations/`) |
 | `app/config.py` | Environment settings and `config/gateway.yaml` validation |
@@ -126,6 +131,7 @@ Every response tells you how it was routed:
 | `X-Gateway-Provider` / `X-Gateway-Model` | The provider and model that answered. The body `model` field has the same value. |
 | `X-Gateway-Fallbacks` | Targets examined before the one that answered (skipped or failed). |
 | `X-Gateway-Request-Id` | Id of the request in the usage log. Also sent on errors. |
+| `X-Gateway-Cache` | Only on aliases that use the cache: `hit`, `miss`, `bypass` or `unavailable` (see [Response cache](#response-cache)). |
 
 Errors always use the OpenAI format (`{"error": {"message", "type", "param", "code"}}`), so the SDK raises its usual typed exceptions:
 
@@ -172,6 +178,67 @@ Each chunk is relayed unchanged, except `model`, set to the real model like in n
 
 To keep quotas accurate, the gateway asks the provider for the token usage of the stream (`stream_options.include_usage`) even when the client did not, and then removes it from the stream: the client gets exactly what it asked for. Provider extensions pass through unchanged (Groq always sends its own `x_groq.usage`). If a provider reports no usage, the completion is estimated from the streamed characters.
 
+## Response cache
+
+Applications often ask the same question, or the same question in other words. For the aliases you choose, the gateway keeps complete answers in Redis and answers again without calling any provider: in about 65 ms instead of seconds, and without using any free-tier quota.
+
+### Enable it
+
+The cache compares questions by meaning with a local embedding model, run by Ollama:
+
+```bash
+docker compose --profile ollama up -d
+docker compose exec ollama ollama pull nomic-embed-text   # about 270 MB
+```
+
+Then add a `cache` section to `config/gateway.yaml` (the example file has one, commented out) and restart the gateway:
+
+```yaml
+cache:
+  embedding: { provider: ollama, model: nomic-embed-text }
+  aliases:
+    chat-fast: {}          # only the aliases listed here use the cache
+```
+
+Without the `embedding` line, the cache still answers identical requests.
+
+### How it works
+
+1. **Exact hit.** The request is hashed (every field except `stream`, `stream_options` and `model`, with sorted keys). An identical earlier request of the same tenant on the same alias gets its answer at once, without any embedding.
+2. **Semantic hit.** Otherwise, the last user message is turned into a vector, and Redis vector search looks for the closest stored question **with exactly the same context**: same system prompt, same earlier messages, same parameters (`temperature`, `max_tokens`, ...). Above the similarity threshold (0.95 by default), the stored answer is returned.
+3. **Miss.** The request is routed as usual. A complete answer (`finish_reason: stop`) is stored after the response, from a normal request or from a complete stream.
+
+A cached answer comes with a new `id` and `created`, the original `model` and `usage`, and the `X-Gateway-Provider` / `X-Gateway-Model` of the target that generated it. A streamed request gets it as a stream. The client sees what happened in `X-Gateway-Cache`: `hit`, `miss`, `bypass` or `unavailable`.
+
+```python
+# Force a fresh answer: no lookup, and the new answer replaces the stored one.
+client.chat.completions.create(
+    model="chat-fast",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+    extra_headers={"X-Gateway-Cache": "bypass"},
+)
+```
+
+The default threshold was checked with the real `nomic-embed-text`: rephrased questions scored 0.89 to 0.99, while different but close questions ("reverse a list" / "reverse a string", "2 + 2" / "2 + 3", "capital of France" / "capital of Germany") scored 0.67 to 0.86. At 0.95, none of them gave a wrong hit. Each alias can set its own `similarity_threshold`, and the usage log records the similarity of every hit to tune it.
+
+### Rules
+
+- **Never cached:** requests with `tools`, `functions`, `n > 1` or `seed`, and requests with images or audio. Answers cut short (`length`), errors, and interrupted or cancelled streams are never stored.
+- **Exact hits only:** when the last message is not a user question, or is longer than `max_semantic_chars` (2,000 characters by default): embedding models silently cut long texts, and two long texts with the same start would get the same vector.
+- **Per tenant and per alias:** a tenant never gets an answer generated for another tenant.
+- **Quotas:** a hit counts in the tenant's requests per minute, but uses none of its daily token budget and no provider quota.
+- **Expiry:** an entry is kept for `ttl` seconds (24 h by default); a hit does not extend it. Above `max_entries_per_tenant` (10,000 by default), a tenant's new answers are no longer stored, but its lookups go on.
+- **Failures:** if Redis or the embedding model fails or takes longer than `embedding.timeout` (1 s), the request is routed without the cache (`X-Gateway-Cache: unavailable`). The cache never makes a request fail. Its time counts in the request deadline.
+
+To remove stored answers, for example after changing a system prompt:
+
+```bash
+docker compose exec gateway python -m app.admin clear-cache --tenant acme [--alias chat-fast]
+docker compose exec gateway python -m app.admin clear-cache --all
+```
+
+> **Data kept in Redis.** With the cache on, model answers stay in Redis until they expire or are cleared. The text of the messages is never stored: lookups use hashes and vectors only. Redis creates vector indexes on database 0 only, so `REDIS_URL` must end with `/0` (as in Docker Compose).
+
 ## Authentication and tenants
 
 Every request to `/v1/chat/completions` needs a gateway API key, sent as `Authorization: Bearer <key>` (the `api_key` of the OpenAI SDK). There is no setting to turn authentication off. `/health` stays public and only reports the gateway and Redis status.
@@ -209,7 +276,7 @@ docker compose exec gateway python -m app.admin set-limits --tenant acme --token
 
 ### `config/gateway.yaml`
 
-The file has four sections. Limits belong to the **model**, routes only reference `provider/model`. An invalid file, or a route to an undeclared model, stops the gateway at startup with a clear message.
+The file has five sections. Limits belong to the **model**, routes only reference `provider/model`. An invalid file, or a route to an undeclared model, stops the gateway at startup with a clear message.
 
 ```yaml
 gateway:                      # all optional, defaults shown
@@ -233,6 +300,19 @@ tenants:                      # optional; a missing limit means "no limit"
     rpm: 60                   # requests per minute of each tenant
     tokens_per_day: 500000    # daily token budget of each tenant, reset at 00:00 UTC
 
+cache:                        # optional; no section, no cache
+  embedding:                  # optional; without it, identical requests only
+    provider: ollama          # a declared provider, called on /embeddings
+    model: nomic-embed-text   # changing it starts an empty semantic cache
+    timeout: 1                # seconds; slower means no cache for that request
+  similarity_threshold: 0.95  # cosine similarity for a semantic hit
+  ttl: 86400                  # seconds an answer is kept
+  max_semantic_chars: 2000    # longer questions: exact hits only
+  max_entries_per_tenant: 10000
+  aliases:                    # only these aliases use the cache
+    chat-fast: {}
+    chat-faq: { similarity_threshold: 0.9, ttl: 604800 }   # per-alias overrides
+
 providers:
   groq:
     base_url: https://api.groq.com/openai/v1
@@ -255,7 +335,7 @@ See [`config/gateway.yaml`](config/gateway.yaml) for the full example.
 
 ### Usage log
 
-The `usage_log` table has one row per examined target, grouped by `request_id`: tenant, API key, alias, provider, model, outcome, status, latency, token estimate and real usage. Streamed requests have `stream = true` and `first_token_ms`, the time to the first content; `latency_ms` is the whole duration of the attempt.
+The `usage_log` table has one row per examined target, grouped by `request_id`: tenant, API key, alias, provider, model, outcome, status, latency, token estimate and real usage. Streamed requests have `stream = true` and `first_token_ms`, the time to the first content; `latency_ms` is the whole duration of the attempt. On aliases that use the cache, every row has `cache` (`hit`, `miss`, `bypass` or `unavailable`); a hit is one `cache_hit` row with the tokens the cache saved and its `cache_similarity`.
 
 | Outcome | Meaning |
 |---|---|
@@ -267,6 +347,7 @@ The `usage_log` table has one row per examined target, grouped by `request_id`: 
 | `rejected_tenant_quota` | The tenant was over its own quota. No target is examined (`provider` and `model` are empty). |
 | `interrupted` | A stream broke after its first content (provider error, idle timeout or maximum duration). |
 | `cancelled` | The client disconnected before the end of the answer. |
+| `cache_hit` | Answered from the cache. `provider`, `model` and the token counts are those of the original answer: the tokens saved. `latency_ms` is the lookup time. |
 
 ### Free-tier providers
 
@@ -307,6 +388,14 @@ Checked on the providers' documentation on 2026-10-21. Free tiers change often (
 
 **The only change to the client request: stream usage.** The gateway never changes the request, with one exception: for streams it adds `stream_options.include_usage` and removes the usage chunk from what the client receives. Without it, most streams would report no usage, and every stream would keep its whole `max_tokens` reservation: budgets would run out far too early.
 
+**A local embedding model, never a failover between them.** Vectors from two embedding models cannot be compared, so the cache uses one fixed model, and its name is part of the semantic search: changing it starts an empty semantic cache. A local model (Ollama) keeps the questions on your machine and costs no quota. If it is down, the cache is skipped, not switched to another model.
+
+**Same context, similar question.** Comparing whole conversations by meaning would match two different conversations that end with "and in Python?". So only the last user question is compared by meaning; everything else (system prompt, earlier messages, parameters) must be identical. Unknown request fields count too, so a new parameter can never produce a wrong hit.
+
+**Cache per tenant, opt-in per alias.** Sharing answers between tenants would give more hits, but an answer can quote the prompt of another client. And a semantic cache can return an answer to a slightly different question, so the operator turns it on alias by alias.
+
+**One atomic write per answer.** A Lua script checks that no answer to the same request is stored yet and that the tenant is under its entry limit, then writes the entry: identical concurrent requests keep the first answer, and the limit is never over-booked. Redis has no eviction policy set, because it could evict quota or breaker keys instead of cache entries.
+
 **Never store prompts.** The usage log stores the prompt length only. Upstream error messages of client errors are not stored either, because some providers quote the invalid input in them.
 
 ## Development
@@ -326,12 +415,15 @@ uv run ruff check . && uv run ruff format --check .
 uv run mypy
 ```
 
-Tests go through the HTTP API: upstream providers are mocked with [respx](https://lundberg.github.io/respx/), Redis and PostgreSQL are real. They cover failover on `429`, `5xx` and timeouts, no failover on `400`, cooldowns, circuit breaker transitions (including the half-open trial under concurrency), concurrent quota reservation, `Retry-After`, streaming (failover before the first token, interruptions, stream timeouts, client disconnects, token usage), the deadline, degraded mode, API keys (revocation, cache, database outages), tenant quotas under concurrency, the admin command line run as a real process, and the official OpenAI SDK. CI runs the same checks on every push.
+Tests go through the HTTP API: upstream providers are mocked with [respx](https://lundberg.github.io/respx/), Redis and PostgreSQL are real. They cover failover on `429`, `5xx` and timeouts, no failover on `400`, cooldowns, circuit breaker transitions (including the half-open trial under concurrency), concurrent quota reservation, `Retry-After`, streaming (failover before the first token, interruptions, stream timeouts, client disconnects, token usage), the response cache (exact and semantic hits, isolation per tenant and alias, eligibility, streams, bypass, entry limit, failures), the deadline, degraded mode, API keys (revocation, cache, database outages), tenant quotas under concurrency, the admin command line run as a real process, and the official OpenAI SDK. CI runs the same checks on every push.
 
 ## Limitations
 
 - **No failover once a stream has started.** After the first token, a provider failure ends the stream with a `stream_interrupted` error event; the client must retry.
 - **A provider must accept `stream_options`.** The gateway adds it to every streamed request. The providers of the example config accept it; check a new provider before adding it.
+- **A semantic hit answers a similar question, not the same one.** With a lower threshold, a close but different question can get a wrong answer. Keep the cache for aliases where that is acceptable, and use `bypass` or `clear-cache` to fix a wrong answer.
+- **Identical concurrent requests all call a provider.** Before the first answer is stored, each of them is a miss; only the first answer is kept.
+- **The cache needs Redis database 0**, where Redis creates its vector indexes.
 - **A revoked key keeps working up to 60 s** on each gateway instance, until its cache entry expires (`AUTH_CACHE_TTL`). The cache is per instance.
 - **A hanging PostgreSQL slows down authentication.** If the database accepts connections but never answers, each request whose key cache entry has expired waits `DATABASE_TIMEOUT` (5 s) before the grace period lets it through.
 - **The tenant token budget is checked against an estimate.** A request whose `max_tokens` does not fit the remaining budget is refused, even if the real answer would have been short. The error message suggests lowering `max_tokens`.
