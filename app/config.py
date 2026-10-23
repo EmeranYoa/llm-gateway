@@ -163,17 +163,39 @@ class TenantsSection(_FileModel):
     """Limits of every tenant that has no limits of its own (set with `set-limits`)."""
 
 
+class EmbeddingSection(_FileModel):
+    """The one embedding model of the semantic cache.
+
+    Vectors of two embedding models cannot be compared, so there is no failover
+    to another model.
+    """
+
+    provider: str
+    """A declared provider, called on its OpenAI-compatible `/embeddings` endpoint."""
+    model: str = Field(min_length=1)
+    timeout: float = Field(default=1.0, gt=0)
+
+
 class CachedAliasSection(_FileModel):
     """Cache settings of one alias. A missing value falls back to the `cache` section."""
 
     ttl: float | None = Field(default=None, gt=0)
+    similarity_threshold: float | None = Field(default=None, gt=0, le=1)
 
 
 class CacheSection(_FileModel):
-    """The response cache. Only the aliases listed in `aliases` use it."""
+    """The response cache. Only the aliases listed in `aliases` use it.
 
+    Without `embedding`, only identical requests are answered from the cache.
+    """
+
+    embedding: EmbeddingSection | None = None
     ttl: float = Field(default=86400.0, gt=0)
     """Seconds a stored answer is kept. A hit does not extend it."""
+    similarity_threshold: float = Field(default=0.95, gt=0, le=1)
+    """Cosine similarity from which a rephrased question gets the stored answer."""
+    max_semantic_chars: int = Field(default=2000, gt=0)
+    """Longer questions only get exact hits: an embedding model silently cuts long texts."""
     aliases: dict[str, CachedAliasSection]
 
 
@@ -215,6 +237,19 @@ class AliasCache:
 
     ttl: float
     """Seconds a stored answer is kept."""
+    similarity_threshold: float
+    """Cosine similarity from which a rephrased question gets the stored answer."""
+
+
+@dataclass(frozen=True)
+class EmbeddingSettings:
+    """The embedding model of the semantic cache, and the provider that runs it."""
+
+    provider: ProviderSettings
+    model: str
+    timeout: float
+    max_chars: int
+    """Longer questions are not embedded: they only get exact hits."""
 
 
 @dataclass(frozen=True)
@@ -230,6 +265,8 @@ class GatewayConfig:
     tenant_default_limits: TenantLimits
     cached_aliases: Mapping[str, AliasCache]
     """The aliases that use the response cache. Empty when there is no `cache` section."""
+    cache_embedding: EmbeddingSettings | None
+    """None when the cache only answers identical requests."""
     routes: Mapping[str, tuple[Target, ...]]
     enabled_providers: tuple[str, ...]
     disabled_providers: tuple[str, ...]
@@ -255,6 +292,7 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
         stream=file_config.gateway.stream,
         tenant_default_limits=file_config.tenants.default_limits,
         cached_aliases=_resolve_cached_aliases(file_config.cache),
+        cache_embedding=_resolve_cache_embedding(file_config.cache, providers),
         routes=_resolve_routes(file_config, providers),
         enabled_providers=tuple(providers),
         disabled_providers=tuple(disabled),
@@ -297,15 +335,47 @@ def _check_cached_aliases(file_config: FileConfig) -> None:
     unknown = [alias for alias in file_config.cache.aliases if alias not in file_config.routes]
     if unknown:
         raise ConfigError(f"the cache section names unknown aliases: {', '.join(unknown)}")
+    embedding = file_config.cache.embedding
+    if embedding is not None and embedding.provider not in file_config.providers:
+        raise ConfigError(
+            f"the cache embedding provider '{embedding.provider}' is not a declared provider"
+        )
 
 
 def _resolve_cached_aliases(cache: CacheSection | None) -> dict[str, AliasCache]:
     if cache is None:
         return {}
     return {
-        alias: AliasCache(ttl=settings.ttl if settings.ttl is not None else cache.ttl)
+        alias: AliasCache(
+            ttl=_own_or(settings.ttl, cache.ttl),
+            similarity_threshold=_own_or(settings.similarity_threshold, cache.similarity_threshold),
+        )
         for alias, settings in cache.aliases.items()
     }
+
+
+def _resolve_cache_embedding(
+    cache: CacheSection | None, providers: Mapping[str, ProviderSettings]
+) -> EmbeddingSettings | None:
+    if cache is None or cache.embedding is None:
+        return None
+    provider = providers.get(cache.embedding.provider)
+    if provider is None:
+        logger.warning(
+            "semantic cache disabled: its embedding provider '%s' is disabled",
+            cache.embedding.provider,
+        )
+        return None
+    return EmbeddingSettings(
+        provider=provider,
+        model=cache.embedding.model,
+        timeout=cache.embedding.timeout,
+        max_chars=cache.max_semantic_chars,
+    )
+
+
+def _own_or(own: float | None, default: float) -> float:
+    return own if own is not None else default
 
 
 def _resolve_providers(

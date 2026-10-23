@@ -208,12 +208,13 @@ async def chat_completions(
         attempts=attempts,
     )
     cache_key = _cache_key(response_cache, request)
+    cache_lookup = None
     if cache_key is not None:
-        cached = await response_cache.lookup(owner.tenant_id, request.model, cache_key)
-        if cached is not None:
+        cache_lookup = await response_cache.lookup(owner.tenant_id, request.model, cache_key)
+        if cache_lookup.answer is not None:
             # No provider is called: the tenant budget gets its reserved tokens back.
             await tenant_gate.release(admission)
-            return _cached_response(cached, request_id)
+            return _cached_response(cache_lookup.answer, request_id)
     routing = _route(gateway_router, request, attempts, redis_down=admission.degraded)
     try:
         # A streamed request may wait long for its first content: stop if the client leaves.
@@ -235,6 +236,7 @@ async def chat_completions(
                 cache_key,
                 result.body,
                 result.target,
+                cache_lookup.vector if cache_lookup is not None else None,
             )
         headers = result.headers if isinstance(result, JSONResponse) else response.headers
         headers["X-Gateway-Cache"] = "miss"

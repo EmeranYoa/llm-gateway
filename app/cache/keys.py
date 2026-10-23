@@ -23,10 +23,16 @@ _IGNORED_FIELDS = frozenset({"stream", "stream_options", "model"})
 
 @dataclass(frozen=True)
 class RequestKey:
-    """The cache keys of one request: SHA-256 hashes, never the text itself."""
+    """The cache keys of one request: SHA-256 hashes, and the question to compare by meaning."""
 
     context: str
     exact: str
+    question: str | None
+    """The text of the last message when it comes from the user, for the semantic search.
+
+    Kept in memory only, never stored. None when the last message is not a user
+    question: the request then only gets exact hits.
+    """
 
 
 def request_key(body: Mapping[str, Any]) -> RequestKey:
@@ -40,7 +46,25 @@ def request_key(body: Mapping[str, Any]) -> RequestKey:
     messages = list(fields.get("messages") or [])
     last_message = messages.pop() if messages else None
     context = _sha256({**fields, "messages": messages})
-    return RequestKey(context=context, exact=_sha256({"context": context, "last": last_message}))
+    return RequestKey(
+        context=context,
+        exact=_sha256({"context": context, "last": last_message}),
+        question=_question(last_message),
+    )
+
+
+def _question(message: object) -> str | None:
+    """The text of a user message: its content, or its text parts joined with spaces."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and all(
+        isinstance(part, dict) and part.get("type") == "text" for part in content
+    ):
+        return " ".join(str(part.get("text", "")) for part in content)
+    return None
 
 
 def _sha256(value: object) -> str:
