@@ -28,6 +28,7 @@ from app.auth.keys import ADMIN_KEY_PREFIX
 from app.config import Settings, load_config
 from app.storage.admin_keys import find_admin
 from app.storage.db import create_database_engine
+from app.storage.redis_client import create_redis_client
 
 
 def create_admin_app(settings: Settings | None = None) -> FastAPI:
@@ -38,14 +39,18 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     config = load_config(settings.gateway_config_path, os.environ)
     database_engine = create_database_engine(settings)
+    redis_client = create_redis_client(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
         await database_engine.dispose()
+        await redis_client.aclose()
 
     app = FastAPI(title="LLM Gateway admin API", version="0.5.0", lifespan=lifespan)
     app.state.config = config
+    app.state.database_engine = database_engine
+    app.state.redis = redis_client
     app.state.admin_authenticator = Authenticator(
         database_engine,
         key_prefix=ADMIN_KEY_PREFIX,

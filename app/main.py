@@ -7,9 +7,6 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
-from redis.asyncio import Redis
-from redis.asyncio.retry import Retry
-from redis.backoff import NoBackoff
 
 from app.api.routes import (
     authentication_unavailable_handler,
@@ -27,6 +24,7 @@ from app.providers.openai_compat import OpenAICompatibleProvider
 from app.routing.acquisition import TargetGate, TenantGate
 from app.routing.router import Router
 from app.storage.db import create_database_engine
+from app.storage.redis_client import create_redis_client
 from app.storage.tenants import find_key_owner
 from app.storage.usage import UsageLog
 
@@ -40,14 +38,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     config = load_config(settings.gateway_config_path, os.environ)
     http_client = httpx.AsyncClient()
-    # Short timeouts and no retries: when Redis is down, the gateway must notice
-    # quickly and route without it instead of slowing every request down.
-    redis_client = Redis.from_url(
-        settings.redis_url,
-        socket_timeout=settings.redis_timeout,
-        socket_connect_timeout=settings.redis_timeout,
-        retry=Retry(NoBackoff(), retries=0),
-    )
+    redis_client = create_redis_client(settings)
     database_engine = create_database_engine(settings)
 
     providers: dict[str, Provider] = {}
