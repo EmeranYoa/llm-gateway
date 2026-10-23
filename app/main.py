@@ -15,7 +15,6 @@ from app.api.routes import (
     validation_error_handler,
 )
 from app.auth.authenticator import AuthenticationUnavailable, Authenticator, InvalidApiKey
-from app.auth.keys import KEY_PREFIX
 from app.cache.embeddings import EmbeddingClient
 from app.cache.store import ResponseCache
 from app.config import Settings, load_config
@@ -25,7 +24,6 @@ from app.routing.acquisition import TargetGate, TenantGate
 from app.routing.router import Router
 from app.storage.db import create_database_engine
 from app.storage.redis_client import create_redis_client
-from app.storage.tenants import find_key_owner
 from app.storage.usage import UsageLog
 
 
@@ -81,8 +79,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.usage_log = UsageLog(database_engine, prices=config.prices)
     app.state.authenticator = Authenticator(
         database_engine,
-        key_prefix=KEY_PREFIX,
-        find_owner=find_key_owner,
         cache_ttl=settings.auth_cache_ttl,
         grace_period=settings.auth_grace_period,
     )

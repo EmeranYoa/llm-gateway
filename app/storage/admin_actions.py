@@ -1,7 +1,8 @@
-"""History of admin actions: what operators changed, when, and with which admin key.
+"""History of admin actions: what operators changed, when, and from which account.
 
 Every change made with the admin API or the admin CLI is recorded: keys created
-or revoked, limits set, cached answers removed, usage log purged. A change to the
+or revoked, limits set, cached answers removed, usage log purged, operator
+accounts created. A change to the
 database writes its row in the same transaction as the change itself, so the
 history never misses a change nor records one that was rolled back. Removing
 cached answers acts on Redis, which has no shared transaction with PostgreSQL:
@@ -9,7 +10,8 @@ its row is written right after the removal succeeds. A usage log purge runs in
 many short transactions, one per batch: its row is written once every batch
 has succeeded.
 
-A row never holds a key value, only its short display prefix.
+A row never holds a key value, only its short display prefix, and never a
+password, a password hash or a session token.
 """
 
 import datetime as dt
@@ -32,9 +34,12 @@ class Action(StrEnum):
     REVOKE_KEY = "revoke-key"
     SET_LIMITS = "set-limits"
     CLEAR_CACHE = "clear-cache"
+    PURGE_USAGE_LOG = "purge-usage-log"
+    CREATE_OPERATOR = "create-operator"
+    # Admin keys were replaced by operator accounts in v0.5.1. These two values
+    # are never recorded any more, but older rows of the history still hold them.
     CREATE_ADMIN_KEY = "create-admin-key"
     REVOKE_ADMIN_KEY = "revoke-admin-key"
-    PURGE_USAGE_LOG = "purge-usage-log"
 
 
 class AdminActionRow(Base):
@@ -44,10 +49,11 @@ class AdminActionRow(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
-    admin_key_id: Mapped[int | None] = mapped_column(ForeignKey("admin_keys.id"))
-    """The admin key of the operator; NULL when the action came from the admin CLI."""
+    operator_id: Mapped[int | None] = mapped_column(ForeignKey("operators.id", ondelete="SET NULL"))
+    """The operator account; NULL for the admin CLI, the first setup and actions made
+    with the admin keys of versions before v0.5.1."""
     actor: Mapped[str] = mapped_column(Text)
-    """The name of that admin key, or `cli`."""
+    """The operator's username at the time, `cli` or `setup` (or the name of an old admin key)."""
     action: Mapped[str] = mapped_column(String(32))
     target: Mapped[str | None] = mapped_column(Text)
     """Tenant name or key id; NULL when the action concerns every tenant."""
@@ -60,11 +66,14 @@ class Actor:
     """Who makes a change: an operator through the admin API, or the admin CLI."""
 
     name: str
-    admin_key_id: int | None = None
+    operator_id: int | None = None
 
 
 CLI = Actor("cli")
-"""The admin CLI. It runs on the server with direct database access, so it has no admin key."""
+"""The admin CLI. It runs on the server with direct database access, so it has no account."""
+
+SETUP = Actor("setup")
+"""The creation of the first operator account, with the one-time setup token."""
 
 
 @dataclass(frozen=True)
@@ -73,7 +82,7 @@ class AdminActionInfo:
 
     id: int
     created_at: dt.datetime
-    admin_key_id: int | None
+    operator_id: int | None
     actor: str
     action: Action
     target: str | None
@@ -91,7 +100,7 @@ async def record_action(
     await connection.execute(
         insert(AdminActionRow).values(
             created_at=dt.datetime.now(dt.UTC),
-            admin_key_id=actor.admin_key_id,
+            operator_id=actor.operator_id,
             actor=actor.name,
             action=action,
             target=target,
@@ -145,7 +154,7 @@ async def list_actions(
     query = select(
         AdminActionRow.id,
         AdminActionRow.created_at,
-        AdminActionRow.admin_key_id,
+        AdminActionRow.operator_id,
         AdminActionRow.actor,
         AdminActionRow.action,
         AdminActionRow.target,
@@ -160,7 +169,7 @@ async def list_actions(
         AdminActionInfo(
             row.id,
             row.created_at,
-            row.admin_key_id,
+            row.operator_id,
             row.actor,
             Action(row.action),
             row.target,

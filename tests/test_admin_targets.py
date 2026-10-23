@@ -17,7 +17,7 @@ from app.config import GatewayConfig, Settings, Target, load_config
 from app.routing.acquisition import Reservation, TargetGate
 from app.storage.usage import UsageLogRow
 from tests.conftest import FetchUsageRows
-from tests.test_admin_api import admin_client, new_admin_key
+from tests.test_admin_api import admin_client, new_session
 
 WriteConfig = Callable[[str], Settings]
 
@@ -64,8 +64,8 @@ def settings(write_config: WriteConfig) -> Settings:
 
 
 @pytest.fixture
-async def admin_key(database_url: str) -> str:
-    return await new_admin_key(database_url)
+async def session_token(database_url: str) -> str:
+    return await new_session(database_url)
 
 
 @pytest.fixture
@@ -117,8 +117,10 @@ def row(
     }
 
 
-async def get_targets(settings: Settings, admin_key: str, period: str = "24h") -> dict[str, Any]:
-    async with admin_client(settings, admin_key) as client:
+async def get_targets(
+    settings: Settings, session_token: str, period: str = "24h"
+) -> dict[str, Any]:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/targets", params={"period": period})
     assert response.status_code == 200, response.text
     body: dict[str, Any] = response.json()
@@ -130,9 +132,9 @@ def by_name(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 async def test_targets_lists_every_configured_target_once_in_route_order(
-    settings: Settings, admin_key: str, usage_rows: FetchUsageRows
+    settings: Settings, session_token: str, usage_rows: FetchUsageRows
 ) -> None:
-    report = await get_targets(settings, admin_key)
+    report = await get_targets(settings, session_token)
 
     assert report["period"] == "24h"
     assert [
@@ -164,7 +166,7 @@ async def test_targets_lists_every_configured_target_once_in_route_order(
 
 
 async def test_target_statistics_count_attempts_and_skips_of_the_period(
-    settings: Settings, admin_key: str, database_url: str, usage_rows: FetchUsageRows
+    settings: Settings, session_token: str, database_url: str, usage_rows: FetchUsageRows
 ) -> None:
     await seed(
         database_url,
@@ -186,7 +188,7 @@ async def test_target_statistics_count_attempts_and_skips_of_the_period(
         row(None, None, "rejected_tenant_quota"),
     )
 
-    report = await get_targets(settings, admin_key)
+    report = await get_targets(settings, session_token)
 
     groq = by_name(report)[f"groq/{GROQ}"]["statistics"]
     assert groq == {
@@ -214,7 +216,7 @@ async def test_target_statistics_count_attempts_and_skips_of_the_period(
 
 
 async def test_longer_period_includes_older_rows(
-    settings: Settings, admin_key: str, database_url: str, usage_rows: FetchUsageRows
+    settings: Settings, session_token: str, database_url: str, usage_rows: FetchUsageRows
 ) -> None:
     await seed(
         database_url,
@@ -223,8 +225,8 @@ async def test_longer_period_includes_older_rows(
         row("groq", GROQ, "success", latency_ms=900, age=dt.timedelta(days=8)),
     )
 
-    week = by_name(await get_targets(settings, admin_key, "7d"))[f"groq/{GROQ}"]
-    month = by_name(await get_targets(settings, admin_key, "30d"))[f"groq/{GROQ}"]
+    week = by_name(await get_targets(settings, session_token, "7d"))[f"groq/{GROQ}"]
+    month = by_name(await get_targets(settings, session_token, "30d"))[f"groq/{GROQ}"]
 
     assert week["statistics"]["success"] == 2
     assert week["statistics"]["latency_p50_ms"] == 200.0
@@ -233,7 +235,7 @@ async def test_longer_period_includes_older_rows(
 
 
 async def test_removed_model_is_still_listed_from_its_usage_rows(
-    settings: Settings, admin_key: str, database_url: str, usage_rows: FetchUsageRows
+    settings: Settings, session_token: str, database_url: str, usage_rows: FetchUsageRows
 ) -> None:
     await seed(
         database_url,
@@ -245,7 +247,7 @@ async def test_removed_model_is_still_listed_from_its_usage_rows(
         row("groq", "oldest-model", "success", age=dt.timedelta(days=3)),
     )
 
-    report = await get_targets(settings, admin_key)
+    report = await get_targets(settings, session_token)
 
     assert [f"{item['provider']}/{item['model']}" for item in report["targets"]] == [
         f"groq/{GROQ}",
@@ -261,7 +263,7 @@ async def test_removed_model_is_still_listed_from_its_usage_rows(
 
 
 async def test_a_request_refused_before_the_call_is_not_a_call(
-    settings: Settings, admin_key: str, database_url: str, usage_rows: FetchUsageRows
+    settings: Settings, session_token: str, database_url: str, usage_rows: FetchUsageRows
 ) -> None:
     await seed(
         database_url,
@@ -272,7 +274,7 @@ async def test_a_request_refused_before_the_call_is_not_a_call(
         row("groq", GROQ, "skipped_quota"),
     )
 
-    statistics = by_name(await get_targets(settings, admin_key))[f"groq/{GROQ}"]["statistics"]
+    statistics = by_name(await get_targets(settings, session_token))[f"groq/{GROQ}"]["statistics"]
 
     assert statistics["calls"] == 1
     assert statistics["context_too_large"] == 2
@@ -280,9 +282,9 @@ async def test_a_request_refused_before_the_call_is_not_a_call(
 
 
 async def test_live_state_of_an_idle_target(
-    settings: Settings, admin_key: str, usage_rows: FetchUsageRows
+    settings: Settings, session_token: str, usage_rows: FetchUsageRows
 ) -> None:
-    report = await get_targets(settings, admin_key)
+    report = await get_targets(settings, session_token)
 
     groq = by_name(report)[f"groq/{GROQ}"]["live"]
     resets_at = dt.datetime.fromisoformat(groq["rpd"].pop("resets_at"))
@@ -305,7 +307,7 @@ async def test_live_state_of_an_idle_target(
 
 async def test_live_state_shows_the_quotas_used_now(
     settings: Settings,
-    admin_key: str,
+    session_token: str,
     config: GatewayConfig,
     gate: TargetGate,
     usage_rows: FetchUsageRows,
@@ -321,7 +323,7 @@ async def test_live_state_shows_the_quotas_used_now(
         await gate.acquire(gemini, estimated_tokens=10, attempt_timeout=30), Reservation
     )
 
-    report = await get_targets(settings, admin_key)
+    report = await get_targets(settings, session_token)
 
     groq_live = by_name(report)[f"groq/{GROQ}"]["live"]
     assert groq_live["rpm"] == {"used": 2, "limit": 30}
@@ -337,7 +339,7 @@ async def test_live_state_shows_the_quotas_used_now(
 
 async def test_live_state_shows_a_cooldown_after_a_429(
     settings: Settings,
-    admin_key: str,
+    session_token: str,
     config: GatewayConfig,
     gate: TargetGate,
     usage_rows: FetchUsageRows,
@@ -347,7 +349,7 @@ async def test_live_state_shows_a_cooldown_after_a_429(
     assert isinstance(reservation, Reservation)
     await gate.record_rate_limited(gemini, reservation, retry_after=120)
 
-    report = await get_targets(settings, admin_key)
+    report = await get_targets(settings, session_token)
 
     cooldown = by_name(report)[f"gemini/{GEMINI}"]["live"]["cooldown"]
     assert cooldown["active"] is True
@@ -359,7 +361,7 @@ async def test_live_state_shows_a_cooldown_after_a_429(
 
 async def test_live_state_shows_an_open_breaker(
     settings: Settings,
-    admin_key: str,
+    session_token: str,
     config: GatewayConfig,
     gate: TargetGate,
     usage_rows: FetchUsageRows,
@@ -370,7 +372,7 @@ async def test_live_state_shows_an_open_breaker(
         assert isinstance(reservation, Reservation)
         await gate.record_failure(ollama, reservation, keep_tokens=False, provider_failed=True)
 
-    report = await get_targets(settings, admin_key)
+    report = await get_targets(settings, session_token)
 
     breaker = by_name(report)[f"ollama/{OLLAMA}"]["live"]["breaker"]
     assert breaker["state"] == "open"
@@ -380,7 +382,7 @@ async def test_live_state_shows_an_open_breaker(
 
 
 async def test_live_state_shows_a_half_open_breaker_and_its_trial(
-    write_config: WriteConfig, admin_key: str, redis_url: str, usage_rows: FetchUsageRows
+    write_config: WriteConfig, session_token: str, redis_url: str, usage_rows: FetchUsageRows
 ) -> None:
     # The breaker opens after 1 failure and stays open 0.1 s only.
     settings = write_config(
@@ -395,10 +397,10 @@ async def test_live_state_shows_a_half_open_breaker_and_its_trial(
     await gate.record_failure(groq, reservation, keep_tokens=False, provider_failed=True)
     await asyncio.sleep(0.2)  # the breaker is now half-open
 
-    waiting = by_name(await get_targets(settings, admin_key))[f"groq/{GROQ}"]["live"]["breaker"]
+    waiting = by_name(await get_targets(settings, session_token))[f"groq/{GROQ}"]["live"]["breaker"]
     trial = await gate.acquire(groq, estimated_tokens=10, attempt_timeout=30)
     assert isinstance(trial, Reservation) and trial.is_trial
-    testing = by_name(await get_targets(settings, admin_key))[f"groq/{GROQ}"]["live"]["breaker"]
+    testing = by_name(await get_targets(settings, session_token))[f"groq/{GROQ}"]["live"]["breaker"]
     await redis.aclose()
 
     assert waiting == {"state": "half_open", "open_until": None, "trial_running": False}
@@ -407,7 +409,7 @@ async def test_live_state_shows_a_half_open_breaker_and_its_trial(
 
 async def test_reading_the_live_state_writes_nothing_to_redis(
     settings: Settings,
-    admin_key: str,
+    session_token: str,
     config: GatewayConfig,
     gate: TargetGate,
     redis_url: str,
@@ -420,7 +422,7 @@ async def test_reading_the_live_state_writes_nothing_to_redis(
     redis = Redis.from_url(redis_url)
     before = {key: await redis.dump(key) for key in await redis.keys("*")}
 
-    await get_targets(settings, admin_key)
+    await get_targets(settings, session_token)
 
     after = {key: await redis.dump(key) for key in await redis.keys("*")}
     await redis.aclose()
@@ -428,12 +430,12 @@ async def test_reading_the_live_state_writes_nothing_to_redis(
 
 
 async def test_live_state_is_unknown_when_redis_is_down(
-    settings: Settings, admin_key: str, database_url: str, usage_rows: FetchUsageRows
+    settings: Settings, session_token: str, database_url: str, usage_rows: FetchUsageRows
 ) -> None:
     await seed(database_url, row("groq", GROQ, "success", latency_ms=100))
     redis_down = settings.model_copy(update={"redis_url": UNREACHABLE_REDIS})
 
-    report = await get_targets(redis_down, admin_key)
+    report = await get_targets(redis_down, session_token)
 
     groq = by_name(report)[f"groq/{GROQ}"]
     assert groq["statistics"]["success"] == 1
@@ -450,16 +452,16 @@ async def test_live_state_is_unknown_when_redis_is_down(
 
 @pytest.mark.parametrize("period", ["1y", "", "24H"])
 async def test_targets_refuses_an_unknown_period(
-    settings: Settings, admin_key: str, period: str
+    settings: Settings, session_token: str, period: str
 ) -> None:
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/targets", params={"period": period})
 
     assert response.status_code == 400
     assert response.json()["error"]["param"] == "period"
 
 
-async def test_targets_needs_an_admin_key(settings: Settings) -> None:
+async def test_targets_needs_a_session(settings: Settings) -> None:
     async with admin_client(settings, None) as client:
         response = await client.get("/admin/v1/targets")
 

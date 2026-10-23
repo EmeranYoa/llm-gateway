@@ -20,7 +20,7 @@ function action(id: number, overrides: Partial<AdminAction> = {}): AdminAction {
   return {
     id,
     created_at: "2026-10-23T12:30:00Z",
-    admin_key_id: 1,
+    operator_id: 1,
     actor: "alice",
     action: "set-limits",
     target: "acme",
@@ -52,7 +52,7 @@ describe("ActionHistory", () => {
           action: "revoke-key",
           target: "9",
           actor: "cli",
-          admin_key_id: null,
+          operator_id: null,
           details: { tenant: "acme", prefix: "gw_abcdef" },
         }),
       ],

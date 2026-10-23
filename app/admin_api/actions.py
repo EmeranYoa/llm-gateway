@@ -1,11 +1,10 @@
 """Admin actions: manage the keys and limits of tenants, and their cached answers.
 
 They do what the admin CLI does, for the dashboard. Every change is recorded in
-the history of admin actions with the operator's admin key (see
+the history of admin actions with the operator who made it (see
 `app/storage/admin_actions.py`), and that history is listed here too.
 
-A full key is returned once, by the request that creates it. Admin keys are
-never managed here: they are created with the admin CLI only.
+A full key is returned once, by the request that creates it.
 """
 
 import datetime as dt
@@ -24,7 +23,7 @@ from app.cache.store import ResponseCache
 from app.config import TenantLimits
 from app.schemas import ErrorBody
 from app.storage.admin_actions import Action, Actor, list_actions, record_cache_clear
-from app.storage.admin_keys import AdminIdentity
+from app.storage.operators import OperatorIdentity
 from app.storage.tenants import (
     ApiKeyInfo,
     Revocation,
@@ -134,10 +133,12 @@ class AdminAction(BaseModel):
 
     id: int
     created_at: dt.datetime
-    admin_key_id: int | None
-    """The admin key used; null for the admin CLI."""
+    operator_id: int | None
+    """The operator account; null for the admin CLI, the first setup and old actions."""
     actor: str
-    """The name of that admin key, or `cli`."""
+    """The operator's username at the time, `cli` or `setup`.
+
+    Actions made before v0.5.1 show the name of the admin key used instead."""
     action: Action
     target: str | None
     """Tenant name or key id; null when the action concerns every tenant."""
@@ -288,8 +289,8 @@ async def actions(
 # --- Helpers ---
 
 
-def _actor(admin: AdminIdentity) -> Actor:
-    return Actor(admin.name, admin.admin_key_id)
+def _actor(admin: OperatorIdentity) -> Actor:
+    return Actor(admin.username, admin.operator_id)
 
 
 def _unknown_tenant(name: str) -> JSONResponse:

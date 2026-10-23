@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.auth.keys import hash_key
 from app.config import Settings
 from app.storage.admin_actions import CLI
-from app.storage.admin_keys import create_admin_key, list_admin_keys, revoke_admin_key
+from app.storage.operators import create_operator, find_credentials
 from app.storage.tenants import (
     create_api_key,
     find_tenant,
@@ -32,7 +32,7 @@ from tests.conftest import (
     run_admin,
     run_admin_command,
 )
-from tests.test_admin_api import admin_client, new_admin_key
+from tests.test_admin_api import admin_client, new_session, operator_id
 from tests.upstream import CHAT_REQUEST, OLLAMA_URL, completion_body
 
 WriteConfig = Callable[[str], Settings]
@@ -86,19 +86,6 @@ def assert_never_stored(table: str, key: str) -> None:
     assert hash_key(key) not in table
 
 
-async def admin_key_id(database_url: str, key: str) -> int:
-    engine = create_async_engine(database_url)
-    try:
-        async with engine.connect() as connection:
-            found = await connection.scalar(
-                text("SELECT id FROM admin_keys WHERE key_hash = :hash"), {"hash": hash_key(key)}
-            )
-    finally:
-        await engine.dispose()
-    assert found is not None
-    return int(found)
-
-
 async def tenant_id(database_url: str, name: str) -> int:
     engine = create_async_engine(database_url)
     try:
@@ -127,10 +114,10 @@ async def test_create_key_returns_the_key_once_and_records_the_action(
     settings: Settings, database_url: str, actions: FetchActions
 ) -> None:
     operator = f"alice-{uuid4().hex[:6]}"
-    admin_key = await new_admin_key(database_url, operator)
+    session_token = await new_session(database_url, operator)
     tenant = unique_tenant()
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.post("/admin/v1/keys", json={"tenant": tenant, "rpm": 5})
         listed = await client.get(f"/admin/v1/tenants/{tenant}/keys")
 
@@ -143,7 +130,7 @@ async def test_create_key_returns_the_key_once_and_records_the_action(
     # The full key is never shown again.
     assert created["key"] not in listed.text
     [action] = await actions()
-    assert action["admin_key_id"] == await admin_key_id(database_url, admin_key)
+    assert action["operator_id"] == await operator_id(database_url, operator)
     assert action["actor"] == operator
     assert action["action"] == "create-key"
     assert action["target"] == tenant
@@ -153,9 +140,9 @@ async def test_create_key_returns_the_key_once_and_records_the_action(
 
 
 async def test_created_key_works_on_the_gateway(settings: Settings, database_url: str) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         created = (await client.post("/admin/v1/keys", json={"tenant": unique_tenant()})).json()
     async with gateway_client(settings, api_key=created["key"]) as gateway:
         response = await gateway.post("/v1/chat/completions", json=CHAT_REQUEST)
@@ -167,10 +154,10 @@ async def test_tenant_keys_show_own_and_effective_limits(
     write_config: WriteConfig, database_url: str
 ) -> None:
     settings = write_config(DEFAULT_LIMITS_CONFIG)
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
     tenant = unique_tenant()
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         first = (
             await client.post("/admin/v1/keys", json={"tenant": tenant, "tokens_per_day": 500})
         ).json()
@@ -192,9 +179,9 @@ async def test_tenant_keys_show_own_and_effective_limits(
 
 
 async def test_keys_of_an_unknown_tenant_is_404(settings: Settings, database_url: str) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/tenants/no-such-tenant/keys")
 
     assert response.status_code == 404
@@ -204,10 +191,10 @@ async def test_keys_of_an_unknown_tenant_is_404(settings: Settings, database_url
 async def test_revoke_key_refuses_it_on_the_gateway_and_records_the_action(
     settings: Settings, database_url: str, actions: FetchActions
 ) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
     tenant = unique_tenant()
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         created = (await client.post("/admin/v1/keys", json={"tenant": tenant})).json()
         revoked = await client.post(f"/admin/v1/keys/{created['id']}/revoke")
         again = await client.post(f"/admin/v1/keys/{created['id']}/revoke")
@@ -236,10 +223,10 @@ async def test_revoke_key_refuses_it_on_the_gateway_and_records_the_action(
 async def test_set_limits_applies_them_on_the_gateway_and_records_the_action(
     settings: Settings, database_url: str, actions: FetchActions
 ) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
     tenant = unique_tenant()
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         created = (await client.post("/admin/v1/keys", json={"tenant": tenant})).json()
         response = await client.put(f"/admin/v1/tenants/{tenant}/limits", json={"rpm": 1})
     async with gateway_client(settings, api_key=created["key"]) as gateway:
@@ -262,10 +249,10 @@ async def test_set_limits_applies_them_on_the_gateway_and_records_the_action(
 
 
 async def test_set_limits_keeps_the_limits_not_given(settings: Settings, database_url: str) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
     tenant = unique_tenant()
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         await client.post("/admin/v1/keys", json={"tenant": tenant, "rpm": 10})
         response = await client.put(
             f"/admin/v1/tenants/{tenant}/limits", json={"tokens_per_day": 9000}
@@ -282,9 +269,9 @@ async def test_set_limits_keeps_the_limits_not_given(settings: Settings, databas
 async def test_set_limits_refuses_invalid_limits(
     settings: Settings, database_url: str, actions: FetchActions, body: dict[str, Any]
 ) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
     tenant = unique_tenant()
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         await client.post("/admin/v1/keys", json={"tenant": tenant})
 
         response = await client.put(f"/admin/v1/tenants/{tenant}/limits", json=body)
@@ -297,9 +284,9 @@ async def test_set_limits_refuses_invalid_limits(
 async def test_set_limits_of_an_unknown_tenant_is_404(
     settings: Settings, database_url: str, actions: FetchActions
 ) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.put("/admin/v1/tenants/no-such-tenant/limits", json={"rpm": 5})
 
     assert response.status_code == 404
@@ -315,9 +302,9 @@ async def test_set_limits_of_an_unknown_tenant_is_404(
 async def test_create_key_refuses_an_invalid_body(
     settings: Settings, database_url: str, body: dict[str, Any]
 ) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.post("/admin/v1/keys", json=body)
 
     assert response.status_code == 400
@@ -351,9 +338,9 @@ async def remaining_keys(redis_url: str) -> set[str]:
 async def test_clear_cache_of_a_tenant_and_alias_records_the_action(
     settings: Settings, database_url: str, redis_url: str, actions: FetchActions
 ) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
     tenant = unique_tenant()
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         await client.post("/admin/v1/keys", json={"tenant": tenant})
         tenant_number = await tenant_id(database_url, tenant)
         await add_entries(
@@ -384,9 +371,9 @@ async def test_clear_cache_of_a_tenant_and_alias_records_the_action(
 async def test_clear_cache_of_an_unknown_tenant_is_404(
     settings: Settings, database_url: str, actions: FetchActions
 ) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.post("/admin/v1/cache/clear", json={"tenant": "no-such-tenant"})
 
     assert response.status_code == 404
@@ -401,10 +388,10 @@ async def test_actions_are_listed_newest_first_with_a_cursor(
     settings: Settings, database_url: str, actions: FetchActions
 ) -> None:
     operator = f"carol-{uuid4().hex[:6]}"
-    admin_key = await new_admin_key(database_url, operator)
+    session_token = await new_session(database_url, operator)
     tenant = unique_tenant()
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         created = (await client.post("/admin/v1/keys", json={"tenant": tenant})).json()
         await client.put(f"/admin/v1/tenants/{tenant}/limits", json={"rpm": 7})
         await client.post(f"/admin/v1/keys/{created['id']}/revoke")
@@ -422,20 +409,50 @@ async def test_actions_are_listed_newest_first_with_a_cursor(
     assert second_page["next_before"] is None
     newest = first_page["actions"][0]
     assert newest["actor"] == operator
-    assert newest["admin_key_id"] == await admin_key_id(database_url, admin_key)
+    assert newest["operator_id"] == await operator_id(database_url, operator)
     assert newest["target"] == str(created["id"])
     assert newest["details"] == {"tenant": tenant, "prefix": created["prefix"]}
     assert is_utc(newest["created_at"])
     assert created["key"] not in str(first_page) + str(second_page)
 
 
+async def test_actions_made_with_old_admin_keys_are_still_listed(
+    settings: Settings, database_url: str, actions: FetchActions
+) -> None:
+    # Admin keys were replaced by operator accounts in v0.5.1: their actions stay
+    # in the history, with the name of the key as actor and no operator.
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO admin_actions (created_at, actor, action, target, details)"
+                    " VALUES (now(), 'old-key', 'revoke-admin-key', '3', '{}')"
+                )
+            )
+    finally:
+        await engine.dispose()
+    session_token = await new_session(database_url)
+
+    async with admin_client(settings, session_token) as client:
+        response = await client.get("/admin/v1/actions")
+
+    assert response.status_code == 200
+    [old] = response.json()["actions"]
+    assert (old["actor"], old["action"], old["operator_id"]) == (
+        "old-key",
+        "revoke-admin-key",
+        None,
+    )
+
+
 @pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 1001}, {"before": "x"}])
 async def test_actions_refuse_an_invalid_page(
     settings: Settings, database_url: str, params: dict[str, Any]
 ) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/actions", params=params)
 
     assert response.status_code == 400
@@ -456,7 +473,7 @@ ACTION_IDS = ["tenant-keys", "create-key", "revoke-key", "set-limits", "clear-ca
 
 
 @pytest.mark.parametrize(("method", "path", "body"), ACTION_REQUESTS, ids=ACTION_IDS)
-async def test_actions_need_an_admin_key(
+async def test_actions_need_a_session(
     settings: Settings, database_url: str, method: str, path: str, body: dict[str, Any] | None
 ) -> None:
     tenant_key = await new_api_key(database_url)
@@ -477,15 +494,16 @@ async def test_actions_answer_503_when_postgresql_is_down(
     body: dict[str, Any] | None,
 ) -> None:
     settings = write_config(MINIMAL_CONFIG).model_copy(update={"database_url": database_proxy.url})
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
 
-    async with admin_client(settings, admin_key) as client:
-        assert (await client.get("/admin/v1/me")).status_code == 200  # the key is now cached
+    async with admin_client(settings, session_token) as client:
+        assert (await client.get("/admin/v1/me")).status_code == 200
         await database_proxy.stop()
         response = await client.request(method, path, json=body)
 
+    # Sessions are checked in PostgreSQL on every request: the check fails first.
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "database_unavailable"
+    assert response.json()["error"]["code"] == "authentication_unavailable"
 
 
 # --- Admin CLI ---
@@ -499,7 +517,6 @@ async def test_cli_records_its_actions_as_cli(
 ) -> None:
     monkeypatch.setenv("REDIS_URL", redis_url)
     tenant = unique_tenant()
-    operator = f"dave-{uuid4().hex[:6]}"
 
     created = await run_admin(database_url, "create-key", "--tenant", tenant, "--rpm", "60")
     key = created.split()[-1]
@@ -510,30 +527,17 @@ async def test_cli_records_its_actions_as_cli(
     await add_entries(redis_url, entry_key(await tenant_id(database_url, tenant), "chat-fast"))
     await run_admin(database_url, "clear-cache", "--tenant", tenant, "--alias", "chat-fast")
     await run_admin(database_url, "clear-cache", "--all")
-    admin_created = await run_admin(database_url, "create-admin-key", "--name", operator)
-    admin_key = admin_created.split()[-1]
-    [admin_line] = [
-        line
-        for line in (await run_admin(database_url, "list-admin-keys")).splitlines()
-        if operator in line
-    ]
-    admin_id, _, admin_prefix = admin_line.split()[:3]
-    await run_admin(database_url, "revoke-admin-key", admin_id)
 
     rows = await actions()
-    assert all(row["actor"] == "cli" and row["admin_key_id"] is None for row in rows)
+    assert all(row["actor"] == "cli" and row["operator_id"] is None for row in rows)
     assert [(row["action"], row["target"], row["details"]) for row in rows] == [
         ("create-key", tenant, {"key_id": int(key_id), "prefix": prefix, "rpm": 60}),
         ("set-limits", tenant, {"tokens_per_day": 5000}),
         ("revoke-key", key_id, {"tenant": tenant, "prefix": prefix}),
         ("clear-cache", tenant, {"alias": "chat-fast", "removed": 1}),
         ("clear-cache", None, {"alias": None, "removed": 0}),
-        ("create-admin-key", admin_id, {"name": operator, "prefix": admin_prefix}),
-        ("revoke-admin-key", admin_id, {"name": operator, "prefix": admin_prefix}),
     ]
-    table = await table_text(database_url)
-    assert_never_stored(table, key)
-    assert_never_stored(table, admin_key)
+    assert_never_stored(await table_text(database_url), key)
 
 
 async def test_cli_records_nothing_when_a_command_fails(
@@ -541,7 +545,6 @@ async def test_cli_records_nothing_when_a_command_fails(
 ) -> None:
     await run_admin_command(database_url, "revoke-key", "999999999")
     await run_admin_command(database_url, "set-limits", "--tenant", "no-such-tenant", "--rpm", "5")
-    await run_admin_command(database_url, "revoke-admin-key", "999999999")
 
     assert await actions() == []
 
@@ -553,10 +556,10 @@ async def test_clear_cache_answers_503_when_redis_is_down(
     settings = write_config(MINIMAL_CONFIG).model_copy(
         update={"redis_url": "redis://127.0.0.1:1/0"}
     )
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
     tenant = unique_tenant()
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         await client.post("/admin/v1/keys", json={"tenant": tenant})
         response = await client.post("/admin/v1/cache/clear", json={"tenant": tenant})
 
@@ -602,24 +605,21 @@ async def test_a_change_is_rolled_back_when_its_action_cannot_be_recorded(
     assert found.limits.rpm == 10
 
 
-async def test_an_admin_key_change_is_rolled_back_when_its_action_cannot_be_recorded(
+async def test_an_operator_is_not_created_when_its_action_cannot_be_recorded(
     database_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     engine = create_async_engine(database_url)
     name = f"erin-{uuid4().hex[:6]}"
     try:
-        new_key = await create_admin_key(engine, name, actor=CLI)
-        monkeypatch.setattr("app.storage.admin_keys.record_action", failing_record)
+        monkeypatch.setattr("app.storage.operators.record_action", failing_record)
 
         with pytest.raises(RecordingFailed):
-            await create_admin_key(engine, name, actor=CLI)
-        with pytest.raises(RecordingFailed):
-            await revoke_admin_key(engine, new_key.identity.admin_key_id, actor=CLI)
+            await create_operator(engine, name, "scrypt$16$8$1$AAAA$AAAA", actor=CLI)
 
-        keys = [key for key in await list_admin_keys(engine) if key.name == name]
+        found = await find_credentials(engine, name)
     finally:
         await engine.dispose()
-    assert [(key.id, key.revoked_at) for key in keys] == [(new_key.identity.admin_key_id, None)]
+    assert found is None
 
 
 # --- OpenAPI schema, from which the dashboard generates its types ---
@@ -640,12 +640,12 @@ async def test_openapi_schema_describes_the_action_bodies(settings: Settings) ->
 async def test_tenant_names_lists_every_tenant_in_order(
     settings: Settings, database_url: str
 ) -> None:
-    admin_key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
     created = sorted([f"names-{uuid4().hex[:8]}" for _ in range(3)])
     for name in reversed(created):
         await run_admin(database_url, "create-key", "--tenant", name)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/tenant-names")
 
     assert response.status_code == 200

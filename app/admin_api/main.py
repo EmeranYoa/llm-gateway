@@ -6,8 +6,11 @@ port that Docker Compose never publishes:
 
     uvicorn app.admin_api.main:create_admin_app --factory --port 8001
 
-So even a leaked admin key is useless from outside the internal network, and its
-heavy statistics queries never slow down the chat traffic of the gateway.
+So even a leaked session token is useless from outside the internal network, and
+its heavy statistics queries never slow down the chat traffic of the gateway.
+
+Operators sign in with a username and a password (`sessions.py`). The first
+account is created with a one-time setup token printed at startup (`setup.py`).
 """
 
 import logging
@@ -20,19 +23,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.admin_api import actions, requests, statistics, targets
+from app.admin_api import actions, requests, sessions, setup, statistics, targets
 from app.admin_api.routes import router
-from app.api.routes import (
-    authentication_unavailable_handler,
-    error_response,
-    invalid_api_key_handler,
-    validation_error_handler,
-)
-from app.auth.authenticator import AuthenticationUnavailable, Authenticator, InvalidApiKey
-from app.auth.keys import ADMIN_KEY_PREFIX
+from app.admin_api.setup import SetupToken, announce_setup_token
+from app.api.routes import error_response, validation_error_handler
+from app.auth.authenticator import AuthenticationUnavailable
+from app.auth.sessions import InvalidSession
 from app.config import Settings, load_config
 from app.routing.acquisition import TargetGate
-from app.storage.admin_keys import find_admin
 from app.storage.db import create_database_engine
 from app.storage.redis_client import create_redis_client
 
@@ -48,9 +46,11 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     config = load_config(settings.gateway_config_path, os.environ)
     database_engine = create_database_engine(settings)
     redis_client = create_redis_client(settings)
+    setup_token = SetupToken()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await announce_setup_token(database_engine, setup_token)
         yield
         await database_engine.dispose()
         await redis_client.aclose()
@@ -61,24 +61,40 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     app.state.redis = redis_client
     # Only to read the live state of the targets: the admin API never calls a target.
     app.state.gate = TargetGate(redis_client, config.cooldown, config.breaker)
-    app.state.admin_authenticator = Authenticator(
-        database_engine,
-        key_prefix=ADMIN_KEY_PREFIX,
-        find_owner=find_admin,
-        cache_ttl=settings.auth_cache_ttl,
-        grace_period=settings.auth_grace_period,
-    )
+    app.state.setup_token = setup_token
     app.add_exception_handler(RequestValidationError, validation_error_handler)
-    app.add_exception_handler(InvalidApiKey, invalid_api_key_handler)
+    app.add_exception_handler(InvalidSession, invalid_session_handler)
     app.add_exception_handler(AuthenticationUnavailable, authentication_unavailable_handler)
     app.add_exception_handler(SQLAlchemyError, database_unavailable_handler)
     app.add_exception_handler(OSError, database_unavailable_handler)
     app.include_router(router)
+    app.include_router(setup.router)
+    app.include_router(sessions.router)
     app.include_router(statistics.router)
     app.include_router(targets.router)
     app.include_router(requests.router)
     app.include_router(actions.router)
     return app
+
+
+async def invalid_session_handler(_: Request, __: Exception) -> JSONResponse:
+    """Refuse a request without a valid session (OpenAI format, 401): sign in again."""
+    return error_response(
+        401,
+        "Missing, invalid or expired session. Sign in again.",
+        "invalid_request_error",
+        code="invalid_session",
+    )
+
+
+async def authentication_unavailable_handler(_: Request, __: Exception) -> JSONResponse:
+    """Refuse a request whose session cannot be checked: never accept an unchecked session."""
+    return error_response(
+        503,
+        "The session cannot be checked right now. Try again later.",
+        "api_error",
+        code="authentication_unavailable",
+    )
 
 
 async def database_unavailable_handler(_: Request, exc: Exception) -> JSONResponse:

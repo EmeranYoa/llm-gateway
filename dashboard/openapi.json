@@ -8,9 +8,10 @@
           "revoke-key",
           "set-limits",
           "clear-cache",
+          "purge-usage-log",
+          "create-operator",
           "create-admin-key",
-          "revoke-admin-key",
-          "purge-usage-log"
+          "revoke-admin-key"
         ],
         "title": "Action",
         "type": "string"
@@ -25,17 +26,6 @@
             "title": "Actor",
             "type": "string"
           },
-          "admin_key_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Admin Key Id"
-          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -49,6 +39,17 @@
           "id": {
             "title": "Id",
             "type": "integer"
+          },
+          "operator_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Id"
           },
           "target": {
             "anyOf": [
@@ -65,7 +66,7 @@
         "required": [
           "id",
           "created_at",
-          "admin_key_id",
+          "operator_id",
           "actor",
           "action",
           "target",
@@ -549,15 +550,32 @@
         "type": "string"
       },
       "Me": {
-        "description": "The operator who owns the admin key of the request.",
+        "description": "The operator signed in with the session of the request.",
         "properties": {
-          "name": {
-            "title": "Name",
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "must_change_password": {
+            "title": "Must Change Password",
+            "type": "boolean"
+          },
+          "username": {
+            "title": "Username",
             "type": "string"
           }
         },
         "required": [
-          "name"
+          "username",
+          "must_change_password",
+          "language"
         ],
         "title": "Me",
         "type": "object"
@@ -1351,6 +1369,93 @@
         "title": "SeriesPoint",
         "type": "object"
       },
+      "Session": {
+        "description": "A session just opened. This is the only time the `token` is shown.\n\nSend it as `Authorization: Bearer <token>` on every other admin request.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "username",
+          "expires_at"
+        ],
+        "title": "Session",
+        "type": "object"
+      },
+      "SetupRequest": {
+        "additionalProperties": false,
+        "description": "Create the first operator account with the setup token printed in the log.",
+        "properties": {
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "username",
+          "password"
+        ],
+        "title": "SetupRequest",
+        "type": "object"
+      },
+      "SetupStatus": {
+        "properties": {
+          "open": {
+            "title": "Open",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "open"
+        ],
+        "title": "SetupStatus",
+        "type": "object"
+      },
+      "SignInRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "maxLength": 256,
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "SignInRequest",
+        "type": "object"
+      },
       "TargetLiveState": {
         "description": "State of the target in Redis right now, shared by every gateway instance.",
         "properties": {
@@ -2089,7 +2194,7 @@
     },
     "/admin/v1/me": {
       "get": {
-        "description": "Return the name of the operator who owns the admin key: the dashboard logs in with it.",
+        "description": "Describe the operator signed in with the session of the request.",
         "operationId": "me_admin_v1_me_get",
         "parameters": [
           {
@@ -2424,6 +2529,181 @@
         "summary": "Get Request"
       }
     },
+    "/admin/v1/sessions": {
+      "post": {
+        "description": "Open a session with a username and a password.\n\nA wrong password, an unknown username and a disabled account all get the\nsame answer, so the answer never tells which usernames exist.",
+        "operationId": "sign_in_admin_v1_sessions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignInRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Wrong username or password"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sign In"
+      }
+    },
+    "/admin/v1/sessions/current": {
+      "delete": {
+        "description": "End the session of the request: its token is refused from now on.",
+        "operationId": "sign_out_admin_v1_sessions_current_delete",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sign Out"
+      }
+    },
+    "/admin/v1/setup": {
+      "get": {
+        "description": "Tell whether the first operator account can still be created. No session needed.",
+        "operationId": "setup_status_admin_v1_setup_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Setup Status"
+      },
+      "post": {
+        "description": "Create the first operator account and sign it in. No session needed: the token is enough.\n\nTwo setups at the same time never create two accounts: exactly one succeeds.",
+        "operationId": "set_up_admin_v1_setup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Password refused"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Wrong setup token"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "An operator account exists already"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Up"
+      }
+    },
     "/admin/v1/targets": {
       "get": {
         "description": "Report the statistics of every target over the period, and its live state.",
@@ -2739,7 +3019,7 @@
     },
     "/health": {
       "get": {
-        "description": "Report that the admin API is up. Used by the Docker health check: no key needed.",
+        "description": "Report that the admin API is up. Used by the Docker health check: no session needed.",
         "operationId": "health_health_get",
         "responses": {
           "200": {

@@ -22,7 +22,7 @@ from app.config import Settings
 from app.storage.tenants import create_api_key
 from app.storage.usage import UsageLogRow
 from tests.conftest import MINIMAL_CONFIG, DatabaseProxy
-from tests.test_admin_api import admin_client, new_admin_key
+from tests.test_admin_api import admin_client, new_session
 
 WriteConfig = Callable[[str], Settings]
 
@@ -112,8 +112,8 @@ def settings(write_config: WriteConfig) -> Settings:
 
 @pytest.fixture
 async def client(settings: Settings, database_url: str) -> AsyncIterator[AsyncClient]:
-    """A client of the admin API that sends a valid admin key."""
-    async with admin_client(settings, await new_admin_key(database_url)) as client:
+    """A client of the admin API that sends a valid session token."""
+    async with admin_client(settings, await new_session(database_url)) as client:
         yield client
 
 
@@ -699,12 +699,12 @@ async def test_unknown_request_is_not_found(client: AsyncClient) -> None:
 
 
 @pytest.mark.parametrize("path", ["/admin/v1/requests", "/admin/v1/requests/failover"])
-async def test_requests_need_an_admin_key(settings: Settings, path: str) -> None:
+async def test_requests_need_a_session(settings: Settings, path: str) -> None:
     async with admin_client(settings, None) as client:
         response = await client.get(path)
 
     assert response.status_code == 401
-    assert response.json()["error"]["code"] == "invalid_api_key"
+    assert response.json()["error"]["code"] == "invalid_session"
 
 
 @pytest.mark.parametrize("path", ["/admin/v1/requests", "/admin/v1/requests/failover"])
@@ -714,13 +714,14 @@ async def test_requests_answer_503_when_postgresql_is_down(
     proxied = settings.model_copy(
         update={"database_url": database_proxy.url, "database_timeout": 0.5}
     )
-    key = await new_admin_key(database_url)
+    session_token = await new_session(database_url)
 
-    async with asyncio.timeout(10), admin_client(proxied, key) as client:
-        first = await client.get("/admin/v1/me")  # the admin key is now cached
+    async with asyncio.timeout(10), admin_client(proxied, session_token) as client:
+        first = await client.get("/admin/v1/me")
         await database_proxy.stop()
         response = await client.get(path)
 
     assert first.status_code == 200
+    # Sessions are checked in PostgreSQL on every request: the check fails first.
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "database_unavailable"
+    assert response.json()["error"]["code"] == "authentication_unavailable"

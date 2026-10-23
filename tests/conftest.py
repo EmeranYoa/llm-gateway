@@ -20,6 +20,8 @@ from redis.asyncio import Redis
 from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.auth import passwords
+from app.auth.passwords import ScryptCost
 from app.config import Settings
 from app.main import create_app
 from app.storage.tenants import create_api_key
@@ -38,6 +40,20 @@ routes:
 
 ClientFactory = Callable[[str], AbstractAsyncContextManager[AsyncClient]]
 FetchUsageRows = Callable[[], Awaitable[list[dict[str, Any]]]]
+
+# The cost of password hashing in production, read before any test changes it.
+DEFAULT_SCRYPT_COST = passwords.SCRYPT_COST
+
+
+@pytest.fixture(autouse=True)
+def cheap_password_hashing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hash operator passwords with cheap scrypt parameters, so the suite stays fast.
+
+    The production cost (128 MiB and up to a second or more per hash) is
+    checked once, in `tests/test_passwords.py`.
+    """
+    monkeypatch.setattr(passwords, "SCRYPT_COST", ScryptCost(n=2**4, r=8, p=1))
+
 
 # Tests need a real PostgreSQL. Locally, start a throwaway one with:
 #   docker run -d --rm --name gateway-test-pg -e POSTGRES_PASSWORD=test \

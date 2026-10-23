@@ -9,7 +9,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import app.storage.admin_actions
-import app.storage.admin_keys
+import app.storage.operators
 import app.storage.tenants
 import app.storage.usage  # noqa: F401
 from app.config import Settings

@@ -97,7 +97,7 @@ export interface paths {
         };
         /**
          * Me
-         * @description Return the name of the operator who owns the admin key: the dashboard logs in with it.
+         * @description Describe the operator signed in with the session of the request.
          */
         get: operations["me_admin_v1_me_get"];
         put?: never;
@@ -164,6 +164,75 @@ export interface paths {
         get: operations["get_request_admin_v1_requests__request_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sign In
+         * @description Open a session with a username and a password.
+         *
+         *     A wrong password, an unknown username and a disabled account all get the
+         *     same answer, so the answer never tells which usernames exist.
+         */
+        post: operations["sign_in_admin_v1_sessions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/sessions/current": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Sign Out
+         * @description End the session of the request: its token is refused from now on.
+         */
+        delete: operations["sign_out_admin_v1_sessions_current_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Setup Status
+         * @description Tell whether the first operator account can still be created. No session needed.
+         */
+        get: operations["setup_status_admin_v1_setup_get"];
+        put?: never;
+        /**
+         * Set Up
+         * @description Create the first operator account and sign it in. No session needed: the token is enough.
+         *
+         *     Two setups at the same time never create two accounts: exactly one succeeds.
+         */
+        post: operations["set_up_admin_v1_setup_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -279,7 +348,7 @@ export interface paths {
         };
         /**
          * Health
-         * @description Report that the admin API is up. Used by the Docker health check: no key needed.
+         * @description Report that the admin API is up. Used by the Docker health check: no session needed.
          */
         get: operations["health_health_get"];
         put?: never;
@@ -299,7 +368,7 @@ export interface components {
          * @description What an operator did.
          * @enum {string}
          */
-        Action: "create-key" | "revoke-key" | "set-limits" | "clear-cache" | "create-admin-key" | "revoke-admin-key" | "purge-usage-log";
+        Action: "create-key" | "revoke-key" | "set-limits" | "clear-cache" | "purge-usage-log" | "create-operator" | "create-admin-key" | "revoke-admin-key";
         /**
          * AdminAction
          * @description A change made by an operator, with the admin API or the admin CLI.
@@ -308,8 +377,6 @@ export interface components {
             action: components["schemas"]["Action"];
             /** Actor */
             actor: string;
-            /** Admin Key Id */
-            admin_key_id: number | null;
             /**
              * Created At
              * Format: date-time
@@ -321,6 +388,8 @@ export interface components {
             };
             /** Id */
             id: number;
+            /** Operator Id */
+            operator_id: number | null;
             /** Target */
             target: string | null;
         };
@@ -509,11 +578,15 @@ export interface components {
         LiveStatus: "known" | "unknown";
         /**
          * Me
-         * @description The operator who owns the admin key of the request.
+         * @description The operator signed in with the session of the request.
          */
         Me: {
-            /** Name */
-            name: string;
+            /** Language */
+            language: string | null;
+            /** Must Change Password */
+            must_change_password: boolean;
+            /** Username */
+            username: string;
         };
         /**
          * NewKeyRequest
@@ -907,6 +980,47 @@ export interface components {
              * @description First moment of the bucket (UTC).
              */
             start: string;
+        };
+        /**
+         * Session
+         * @description A session just opened. This is the only time the `token` is shown.
+         *
+         *     Send it as `Authorization: Bearer <token>` on every other admin request.
+         */
+        Session: {
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Token */
+            token: string;
+            /** Username */
+            username: string;
+        };
+        /**
+         * SetupRequest
+         * @description Create the first operator account with the setup token printed in the log.
+         */
+        SetupRequest: {
+            /** Password */
+            password: string;
+            /** Token */
+            token: string;
+            /** Username */
+            username: string;
+        };
+        /** SetupStatus */
+        SetupStatus: {
+            /** Open */
+            open: boolean;
+        };
+        /** SignInRequest */
+        SignInRequest: {
+            /** Password */
+            password: string;
+            /** Username */
+            username: string;
         };
         /**
          * TargetLiveState
@@ -1465,6 +1579,157 @@ export interface operations {
                 };
             };
             /** @description Unknown request */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sign_in_admin_v1_sessions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SignInRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            /** @description Wrong username or password */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sign_out_admin_v1_sessions_current_delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    setup_status_admin_v1_setup_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupStatus"];
+                };
+            };
+        };
+    };
+    set_up_admin_v1_setup_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetupRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            /** @description Password refused */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Wrong setup token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An operator account exists already */
             404: {
                 headers: {
                     [name: string]: unknown;

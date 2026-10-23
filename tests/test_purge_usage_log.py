@@ -139,7 +139,7 @@ async def test_purge_leaves_other_tables_untouched(
                 prompt_chars=10,
             )
         )
-    tables = ("tenants", "api_keys", "admin_keys", "admin_actions")
+    tables = ("tenants", "api_keys", "operators", "admin_actions")
     before = {table: await count_rows(engine, table) for table in tables}
 
     assert await purge_usage_rows(engine, days_ago(30)) == 1
@@ -187,7 +187,7 @@ async def test_cli_records_the_purge_as_an_admin_action(
     finished = dt.datetime.now(dt.UTC)
     [action] = await purge_actions()
     assert action["actor"] == "cli"
-    assert action["admin_key_id"] is None
+    assert action["operator_id"] is None
     assert action["target"] is None
     assert set(action["details"]) == {"older_than_days", "deleted", "cutoff"}
     assert action["details"]["older_than_days"] == 30

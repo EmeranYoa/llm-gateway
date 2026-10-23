@@ -18,7 +18,7 @@ from app.config import Settings
 from app.storage.tenants import create_api_key
 from app.storage.usage import UsageLogRow
 from tests.conftest import MINIMAL_CONFIG, DatabaseProxy, FetchUsageRows
-from tests.test_admin_api import admin_client, new_admin_key
+from tests.test_admin_api import admin_client, new_session
 
 WriteConfig = Callable[[str], Settings]
 HOUR = dt.timedelta(hours=1)
@@ -31,9 +31,9 @@ def settings(write_config: WriteConfig) -> Settings:
 
 
 @pytest.fixture
-async def admin_key(database_url: str, usage_rows: FetchUsageRows) -> str:
-    """An admin key, with an empty usage log."""
-    return await new_admin_key(database_url)
+async def session_token(database_url: str, usage_rows: FetchUsageRows) -> str:
+    """A session token of an operator, with an empty usage log."""
+    return await new_session(database_url)
 
 
 async def new_tenant(database_url: str, name: str) -> tuple[int, int]:
@@ -183,12 +183,12 @@ def empty_point() -> dict[str, Any]:
 
 
 async def test_overview_of_the_last_24_hours(
-    settings: Settings, database_url: str, admin_key: str
+    settings: Settings, database_url: str, session_token: str
 ) -> None:
     now = dt.datetime.now(dt.UTC)
     await seed_two_tenants(database_url, now)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/overview", params={"period": "24h"})
 
     assert response.status_code == 200
@@ -255,13 +255,13 @@ async def test_overview_of_the_last_24_hours(
 
 
 async def test_overview_of_one_tenant(
-    settings: Settings, database_url: str, admin_key: str
+    settings: Settings, database_url: str, session_token: str
 ) -> None:
     now = dt.datetime.now(dt.UTC)
     _, beta, _ = await seed_two_tenants(database_url, now)
     beta_name = await tenant_name(database_url, beta)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get(
             "/admin/v1/overview", params={"period": "24h", "tenant": beta_name}
         )
@@ -295,7 +295,7 @@ async def test_overview_of_one_tenant(
 
 
 async def test_overview_of_7_days_counts_older_requests_in_utc_days(
-    settings: Settings, database_url: str, admin_key: str
+    settings: Settings, database_url: str, session_token: str
 ) -> None:
     now = dt.datetime.now(dt.UTC)
     alpha, _, _ = await seed_two_tenants(database_url, now)
@@ -310,7 +310,7 @@ async def test_overview_of_7_days_counts_older_requests_in_utc_days(
         ],
     )
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/overview", params={"period": "7d"})
 
     assert response.status_code == 200
@@ -326,7 +326,7 @@ async def test_overview_of_7_days_counts_older_requests_in_utc_days(
 
 
 async def test_series_of_24_hours_is_cut_at_utc_hours(
-    settings: Settings, database_url: str, admin_key: str
+    settings: Settings, database_url: str, session_token: str
 ) -> None:
     now = dt.datetime.now(dt.UTC)
     tenant = await new_tenant(database_url, "hours")
@@ -340,7 +340,7 @@ async def test_series_of_24_hours_is_cut_at_utc_hours(
         ],
     )
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/overview", params={"period": "24h"})
 
     series = series_by_start(response.json())
@@ -348,8 +348,8 @@ async def test_series_of_24_hours_is_cut_at_utc_hours(
     assert series[boundary] == {**empty_point(), "requests": 2, "answered": 2, "cache_hits": 1}
 
 
-async def test_overview_of_an_empty_period(settings: Settings, admin_key: str) -> None:
-    async with admin_client(settings, admin_key) as client:
+async def test_overview_of_an_empty_period(settings: Settings, session_token: str) -> None:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/overview", params={"period": "30d"})
 
     assert response.status_code == 200
@@ -383,8 +383,8 @@ async def test_overview_of_an_empty_period(settings: Settings, admin_key: str) -
     }
 
 
-async def test_overview_of_an_unknown_tenant_is_404(settings: Settings, admin_key: str) -> None:
-    async with admin_client(settings, admin_key) as client:
+async def test_overview_of_an_unknown_tenant_is_404(settings: Settings, session_token: str) -> None:
+    async with admin_client(settings, session_token) as client:
         response = await client.get(
             "/admin/v1/overview", params={"period": "24h", "tenant": "nobody-here"}
         )
@@ -398,9 +398,9 @@ async def test_overview_of_an_unknown_tenant_is_404(settings: Settings, admin_ke
 
 @pytest.mark.parametrize("path", ["/admin/v1/overview", "/admin/v1/tenants"])
 async def test_statistics_refuse_an_unknown_period(
-    settings: Settings, admin_key: str, path: str
+    settings: Settings, session_token: str, path: str
 ) -> None:
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get(path, params={"period": "1y"})
 
     assert response.status_code == 400
@@ -408,7 +408,7 @@ async def test_statistics_refuse_an_unknown_period(
 
 
 @pytest.mark.parametrize("path", ["/admin/v1/overview", "/admin/v1/tenants"])
-async def test_statistics_need_an_admin_key(settings: Settings, path: str) -> None:
+async def test_statistics_need_a_session(settings: Settings, path: str) -> None:
     async with admin_client(settings, None) as client:
         response = await client.get(path, params={"period": "24h"})
 
@@ -416,13 +416,13 @@ async def test_statistics_need_an_admin_key(settings: Settings, path: str) -> No
 
 
 async def test_tenants_of_the_last_24_hours(
-    settings: Settings, database_url: str, admin_key: str
+    settings: Settings, database_url: str, session_token: str
 ) -> None:
     now = dt.datetime.now(dt.UTC)
     alpha, beta, gamma = await seed_two_tenants(database_url, now)
     names = {tenant: await tenant_name(database_url, tenant) for tenant in (alpha, beta, gamma)}
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/tenants", params={"period": "24h"})
 
     assert response.status_code == 200
@@ -471,13 +471,13 @@ async def test_tenants_of_the_last_24_hours(
 
 
 async def test_tenants_of_7_days_include_older_requests(
-    settings: Settings, database_url: str, admin_key: str
+    settings: Settings, database_url: str, session_token: str
 ) -> None:
     now = dt.datetime.now(dt.UTC)
     alpha, _, _ = await seed_two_tenants(database_url, now)
     alpha_name = await tenant_name(database_url, alpha)
 
-    async with admin_client(settings, admin_key) as client:
+    async with admin_client(settings, session_token) as client:
         response = await client.get("/admin/v1/tenants", params={"period": "7d"})
 
     [alpha_row] = [each for each in response.json()["tenants"] if each["tenant"] == alpha_name]
@@ -491,18 +491,19 @@ async def test_statistics_answer_503_when_the_database_is_down(
     write_config: WriteConfig,
     database_url: str,
     database_proxy: DatabaseProxy,
-    admin_key: str,
+    session_token: str,
     path: str,
 ) -> None:
     settings = write_config(MINIMAL_CONFIG).model_copy(update={"database_url": database_proxy.url})
 
-    async with admin_client(settings, admin_key) as client:
-        assert (await client.get("/admin/v1/me")).status_code == 200  # the key is now cached
+    async with admin_client(settings, session_token) as client:
+        assert (await client.get("/admin/v1/me")).status_code == 200
         await database_proxy.stop()
         response = await client.get(path, params={"period": "24h"})
 
+    # Sessions are checked in PostgreSQL on every request: the check fails first.
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "database_unavailable"
+    assert response.json()["error"]["code"] == "authentication_unavailable"
 
 
 async def test_usage_log_is_indexed_by_date(database_url: str) -> None:
