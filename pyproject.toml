@@ -5,6 +5,7 @@ description = "OpenAI-compatible gateway that routes chat requests across free-t
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic",
+    "anyio>=4.15.1",
     "asyncpg",
     "fastapi",
     "httpx",

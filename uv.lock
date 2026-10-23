@@ -340,6 +340,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "anyio" },
     { name = "asyncpg" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -366,6 +367,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic" },
+    { name = "anyio", specifier = ">=4.15.1" },
     { name = "asyncpg" },
     { name = "fastapi" },
     { name = "httpx" },
