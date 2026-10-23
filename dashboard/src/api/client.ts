@@ -1,5 +1,6 @@
 import "server-only";
 
+import { headers as requestHeaders } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { readDashboardConfig } from "@/lib/config";
@@ -215,6 +216,11 @@ async function callAdminApi(
 ): Promise<Response> {
   const { adminApiUrl } = readDashboardConfig();
   const headers: Record<string, string> = { Accept: "application/json" };
+  // The admin API limits sign-ins per address: give it the browser's, not ours.
+  const address = await browserAddress();
+  if (address !== null) {
+    headers["X-Forwarded-For"] = address;
+  }
   if (token !== null) {
     headers.Authorization = `Bearer ${token}`;
   }
@@ -297,4 +303,20 @@ export function parseRetryAfter(
     return null;
   }
   return Math.max(0, Math.ceil((date - now) / 1000));
+}
+
+/**
+ * The address of the browser that made the current request, or null.
+ *
+ * Next.js puts it first in `X-Forwarded-For` (behind a reverse proxy, the
+ * proxy does). Null outside a request, for example during the build.
+ */
+async function browserAddress(): Promise<string | null> {
+  try {
+    const forwardedFor = (await requestHeaders()).get("x-forwarded-for");
+    const first = forwardedFor?.split(",")[0]?.trim();
+    return first ? first : null;
+  } catch {
+    return null;
+  }
 }

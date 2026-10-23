@@ -46,13 +46,21 @@ class AdminApi:
         self._clients: dict[str, AsyncClient] = {}
 
     async def sign_in(
-        self, username: str, password: str, *, ip: str = "203.0.113.1"
+        self,
+        username: str,
+        password: str,
+        *,
+        ip: str = "203.0.113.1",
+        forwarded_for: str | None = None,
     ) -> httpx.Response:
         if ip not in self._clients:
             transport = ASGITransport(app=self._app, client=(ip, 50000))
             self._clients[ip] = AsyncClient(transport=transport, base_url="http://admin-api")
+        headers = {} if forwarded_for is None else {"X-Forwarded-For": forwarded_for}
         return await self._clients[ip].post(
-            "/admin/v1/sessions", json={"username": username, "password": password}
+            "/admin/v1/sessions",
+            json={"username": username, "password": password},
+            headers=headers,
         )
 
     async def close(self) -> None:
@@ -325,3 +333,25 @@ async def test_the_address_limit_is_counted_per_address(
     assert refused.status_code == 429
     assert refused.headers["Retry-After"] == "900"
     assert other_address.status_code == 201
+
+
+async def test_the_address_limit_counts_the_browser_address_forwarded_by_the_dashboard(
+    settings: Settings, username: str, clock: FakeClock
+) -> None:
+    # Every sign-in reaches the admin API from the dashboard's container: the
+    # dashboard forwards the browser's address, which the limit must count.
+    dashboard = "172.18.0.5"
+    async with admin_api(settings, clock) as api:
+        for _ in range(20):
+            await api.sign_in(
+                unique_username(), PASSWORD, ip=dashboard, forwarded_for="198.51.100.7"
+            )
+        refused = await api.sign_in(
+            username, PASSWORD, ip=dashboard, forwarded_for="198.51.100.7, 172.18.0.5"
+        )
+        other_browser = await api.sign_in(
+            username, PASSWORD, ip=dashboard, forwarded_for="198.51.100.8"
+        )
+
+    assert refused.status_code == 429
+    assert other_browser.status_code == 201

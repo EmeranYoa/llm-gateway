@@ -23,6 +23,13 @@ const session = vi.hoisted(() => ({
 
 vi.mock("@/lib/session", () => ({ getSession: async () => session }));
 
+const request = vi.hoisted(() => ({ headers: new Headers() }));
+
+vi.mock("next/headers", () => ({
+  cookies: async () => ({ get: () => undefined }),
+  headers: async () => request.headers,
+}));
+
 vi.mock("next/navigation", () => ({
   redirect: vi.fn((url: string) => {
     throw new Error(`redirect:${url}`);
@@ -179,6 +186,38 @@ describe("callWithSession", () => {
       RequestInit,
     ];
     expect(init.method).toBe("DELETE");
+  });
+});
+
+describe("the browser's address", () => {
+  it("is forwarded to the admin API, which limits sign-ins per address", async () => {
+    request.headers = new Headers({
+      "x-forwarded-for": "203.0.113.7, 10.0.0.2",
+    });
+    const fetchMock = stubFetch(jsonResponse(200, { open: false }));
+
+    await callWithoutSession("/admin/v1/setup");
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect((init.headers as Record<string, string>)["X-Forwarded-For"]).toBe(
+      "203.0.113.7",
+    );
+    request.headers = new Headers();
+  });
+
+  it("is left out when the request has none", async () => {
+    const fetchMock = stubFetch(jsonResponse(200, { open: false }));
+
+    await callWithoutSession("/admin/v1/setup");
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(init.headers).not.toHaveProperty("X-Forwarded-For");
   });
 });
 

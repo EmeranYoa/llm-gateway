@@ -26,6 +26,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.admin_api import (
     actions,
@@ -76,6 +77,12 @@ def create_admin_app(settings: Settings | None = None, *, clock: Clock = utc_now
         await redis_client.aclose()
 
     app = FastAPI(title="LLM Gateway admin API", version="0.5.0", lifespan=lifespan)
+    # Every sign-in reaches the admin API from the dashboard's server, which forwards
+    # the browser's address in `X-Forwarded-For`. Without it, the sign-in limit per
+    # address would count every operator as one, and anyone guessing passwords could
+    # block every sign-in. The header is trusted from any peer because nothing outside
+    # the internal network can reach the admin API (its port is never published).
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
     app.state.config = config
     app.state.database_engine = database_engine
     app.state.redis = redis_client
