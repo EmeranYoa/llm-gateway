@@ -61,12 +61,12 @@ flowchart LR
     router -->|"after the response"| pg[("PostgreSQL<br/>tenants, api_keys,<br/>usage_log")]
 ```
 
-Operators use the dashboard. Its Next.js server calls a separate admin API, on the internal network only; the browser never sees the admin key:
+Operators sign in to the dashboard with a username and a password. Its Next.js server calls a separate admin API, on the internal network only; the browser never sees the session token:
 
 ```mermaid
 flowchart LR
     operator["Operator<br/>(browser)"] -->|"session cookie<br/>(encrypted, httpOnly)"| dashboard["Dashboard<br/>(Next.js server, port 3000)"]
-    dashboard -->|"Bearer gwa_... key<br/>internal network only"| adminapi["Admin API<br/>(FastAPI, port 8001,<br/>never published)"]
+    dashboard -->|"Bearer gws_... session<br/>internal network only"| adminapi["Admin API<br/>(FastAPI, port 8001,<br/>never published)"]
     adminapi -->|"statistics, keys,<br/>admin actions"| pg[("PostgreSQL")]
     adminapi -->|"live state of targets,<br/>cache clear"| redis[("Redis")]
 ```
@@ -94,7 +94,7 @@ flowchart TD
 |---|---|
 | `app/api/routes.py` | HTTP endpoints, OpenAI error format, response headers |
 | `app/auth/` | API key generation, hashing and verification (with its cache) |
-| `app/admin.py` | Admin command line: tenant keys and limits, admin keys, cache clear, usage log purge |
+| `app/admin.py` | Admin command line: tenant keys and limits, cache clear, usage log purge |
 | `app/admin_api/` | Admin API for the dashboard: statistics, live state of targets, requests and their routing path, admin actions |
 | `app/routing/router.py` | Failover loop, deadline, outcome of each attempt |
 | `app/routing/streaming.py` | A stream after its first content: idle timeout, maximum duration, token usage |
@@ -126,13 +126,14 @@ curl http://localhost:8000/health
 docker compose exec gateway python -m app.admin create-key --tenant demo
 ```
 
-To use the dashboard, also set its session secret in `.env` before `docker compose up`, then create an admin key and open [http://localhost:3000](http://localhost:3000):
+To use the dashboard, also set its session secret in `.env` before `docker compose up`, then open [http://localhost:3000](http://localhost:3000) and create the first operator account with the setup token printed in the admin API logs:
 
 ```bash
 # In .env: DASHBOARD_SESSION_SECRET=<at least 32 characters>, for example:
 openssl rand -base64 32
 
-docker compose exec gateway python -m app.admin create-admin-key --name alice
+# The one-time setup token, printed while no operator account exists:
+docker compose logs admin-api | grep -i "setup token"
 ```
 
 No API key at all? Run the optional local model instead (about 2 GB to download):
@@ -303,7 +304,11 @@ The dashboard is for operators: whoever runs the gateway. It shows every tenant,
 | **Requests** | Recent requests, filtered by tenant, alias and status. A request opens its **routing path**: every target examined, in order, with its outcome and latency. |
 | **Keys** | Create a tenant key (shown once), revoke a key, change a tenant's limits, clear its cache, and the history of admin actions. |
 
+| **Operators** | The accounts that can sign in: create one, reset a password, disable or enable an account, change your own password. |
+
 Live screens refresh every 10 seconds without reloading the page, and pause while the tab is hidden. Times are shown in your browser's time zone.
+
+The dashboard speaks **English and French**. Before signing in it follows your browser's language; once signed in, the language chosen in the navigation bar is saved in your account and follows you on every device. Numbers, amounts and dates use the format of that language.
 
 The indicators are counted per request, the way a client sees them:
 
@@ -311,21 +316,18 @@ The indicators are counted per request, the way a client sees them:
 - **Latency**: the whole request, all its attempts included. Cache hits are left out and shown apart, so they do not make providers look fast.
 - **Cost**: the sum of the cost of each answer (see below). Answers of a model without a price are counted and shown as such, never as 0.
 
-### Admin keys and security
+### Operator accounts and security
 
-The dashboard opens with an **admin key** (`gwa_`), created with the command line only:
+Operators sign in with a **username and a password**. Accounts are managed in the dashboard only, on the Operators screen; there is no command for them.
 
-```bash
-docker compose exec gateway python -m app.admin create-admin-key --name alice
-docker compose exec gateway python -m app.admin list-admin-keys
-docker compose exec gateway python -m app.admin revoke-admin-key 3
-```
-
-- Admin keys and tenant keys never cross: a `gwa_` key is refused by the gateway, a `gw_` key by the admin API. Admin keys are stored as SHA-256 hashes, like tenant keys.
-- The admin API runs in its own container, on port 8001, which Docker Compose never publishes: even a leaked admin key is useless from outside the internal network.
-- The dashboard's server keeps the admin key in an encrypted, `httpOnly`, `SameSite=Strict` cookie and calls the admin API itself: the key never reaches the browser's JavaScript. A session lasts 8 hours; a revoked admin key stops working within 60 seconds.
+- **First account.** While no account exists, the admin API prints a one-time **setup token** in its logs. The dashboard's setup screen asks for it: only someone with access to the server can create the first account, not the first visitor of the page. Once an account exists, the setup screen is gone for good.
+- **Other accounts.** An operator creates them with an initial password, which the new operator must change at their first sign-in. Creating an account, resetting a password, disabling or enabling an account and changing your own password all ask for **your current password again**: a stolen session alone cannot create new access. Nobody can disable themselves or the last enabled account, and disabling an account or resetting its password ends its sessions at once.
+- **Lost passwords.** Set `OPERATOR_RECOVERY=true` in `.env` and restart: the admin API prints a one-time **recovery token**, and the dashboard's recovery screen uses it to give an account a new password (to change at the next sign-in). A banner reminds you to remove the variable afterwards.
+- **Passwords** have at least 12 characters and are hashed with `scrypt` (OWASP parameters, a salt per account). After 5 wrong passwords in 15 minutes an account is locked for 15 minutes, and each browser address may try 20 times in 15 minutes. The sign-in answer is the same for an unknown username, a wrong password and a locked or disabled account, and takes the same time.
+- **Sessions** last 8 hours. Only a hash of the session token is stored, and the admin API checks it in PostgreSQL on every call: signing out, disabling an account or resetting its password takes effect at once.
+- The admin API runs in its own container, on port 8001, which Docker Compose never publishes. The dashboard's server keeps the session token in an encrypted, `httpOnly`, `SameSite=Strict` cookie and calls the admin API itself: the token never reaches the browser's JavaScript.
 - Docker Compose publishes the dashboard on `127.0.0.1:3000` only. Its session cookie is `Secure`: to reach it from another machine, put it behind HTTPS.
-- Every change made from the dashboard or the command line (keys, limits, cache clear, purge) is recorded in the `admin_actions` table, shown on the Keys screen. Key values are never recorded.
+- Every change made from the dashboard or the command line (accounts, keys, limits, cache clear, purge) is recorded in the `admin_actions` table, shown on the Keys screen. Passwords, tokens and key values are never recorded.
 
 ### Costs
 
@@ -364,6 +366,7 @@ It deletes in small batches, so the gateway keeps writing while it runs, and rec
 | `AUTH_GRACE_PERIOD` | `900` | Seconds a verified API key keeps working while PostgreSQL is unavailable. Other keys get `503 authentication_unavailable`. |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `gateway` | Credentials of the PostgreSQL started by Docker Compose. |
 | `DASHBOARD_SESSION_SECRET` | (none) | Dashboard only. Encrypts its session cookie. At least 32 characters, or the dashboard refuses to start. |
+| `OPERATOR_RECOVERY` | `false` | Admin API only. `true` prints a one-time recovery token at startup, to give back access to an operator account. Remove it once done. |
 | `ADMIN_API_URL` | (none) | Dashboard only. Where its server reaches the admin API. Set by Docker Compose (`http://admin-api:8001`). |
 
 ### `config/gateway.yaml`
@@ -512,9 +515,13 @@ providers:
 
 **One atomic write per answer.** A Lua script checks that no answer to the same request is stored yet and that the tenant is under its entry limit, then writes the entry: identical concurrent requests keep the first answer, and the limit is never over-booked. Redis has no eviction policy set, because it could evict quota or breaker keys instead of cache entries.
 
-**The admin API in its own process, on a port nobody outside can reach.** The same code and image as the gateway, started with another command. The public surface is unchanged, a bug in an admin route or a leaked admin key cannot be used from the internet, and heavy statistics queries never slow down the chat traffic.
+**The admin API in its own process, on a port nobody outside can reach.** The same code and image as the gateway, started with another command. The public surface is unchanged, a bug in an admin route or a stolen session cannot be used from the internet, and heavy statistics queries never slow down the chat traffic.
 
-**A backend for frontend.** The dashboard's server, not the browser, holds the admin key and calls the admin API. A script injected in the page could not steal the key, and the admin API needs no CORS.
+**A backend for frontend.** The dashboard's server, not the browser, holds the session token and calls the admin API. A script injected in the page could not steal it, and the admin API needs no CORS.
+
+**Accounts for people, managed where people work.** v0.5.0 opened the dashboard with long admin keys created on the command line, which ended up pasted in chats and notes. Operators now sign in with a password, and manage each other's accounts in the dashboard. What a key gave for free has to be built: slow password hashing, account locks, no account enumeration, re-authentication for sensitive actions, and a way back in that only someone with the server can use.
+
+**Translated in the dashboard, not in the API.** The admin API stays in English, like the gateway: a stable technical contract. The dashboard translates its error codes; its dictionaries are typed, so a missing French text fails the build.
 
 **Statistics computed from the usage log, when asked.** Direct SQL with an index on `created_at`, over 30 days at most, instead of pre-aggregated tables to keep in sync. The admin API hides how the numbers are computed, so pre-aggregation can come later without changing the dashboard.
 
