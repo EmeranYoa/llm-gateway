@@ -40,7 +40,7 @@ export class AdminApiError extends Error {
 
 /** Return the operator who owns the admin key of the session. */
 export async function getMe(): Promise<Me> {
-  return getWithSession<Me>("/admin/v1/me");
+  return callWithSession<Me>("/admin/v1/me");
 }
 
 /**
@@ -56,12 +56,27 @@ export async function checkAdminKey(adminKey: string): Promise<Me | null> {
   return readBody<Me>(response);
 }
 
-async function getWithSession<T>(path: string): Promise<T> {
+/** A write to the admin API: the HTTP method and the JSON body, if any. */
+export type AdminApiWrite = {
+  method: "POST" | "PUT";
+  body?: unknown;
+};
+
+/**
+ * Call the admin API with the admin key of the session and return the JSON answer.
+ *
+ * Without a session, sends to the sign-in page; on a 401, ends the session.
+ * Any other error is raised as an `AdminApiError`.
+ */
+export async function callWithSession<T>(
+  path: string,
+  write?: AdminApiWrite,
+): Promise<T> {
   const { adminKey } = await getSession();
   if (!adminKey) {
     redirect("/login");
   }
-  const response = await callAdminApi(path, adminKey);
+  const response = await callAdminApi(path, adminKey, write);
   if (response.status === 401) {
     // The key was revoked, or expired from the admin API's point of view.
     redirect(SESSION_EXPIRED_PATH);
@@ -69,14 +84,24 @@ async function getWithSession<T>(path: string): Promise<T> {
   return readBody<T>(response);
 }
 
-async function callAdminApi(path: string, adminKey: string): Promise<Response> {
+async function callAdminApi(
+  path: string,
+  adminKey: string,
+  write?: AdminApiWrite,
+): Promise<Response> {
   const { adminApiUrl } = readDashboardConfig();
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${adminKey}`,
+    Accept: "application/json",
+  };
+  if (write?.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
   try {
     return await fetch(`${adminApiUrl}${path}`, {
-      headers: {
-        Authorization: `Bearer ${adminKey}`,
-        Accept: "application/json",
-      },
+      method: write?.method ?? "GET",
+      headers,
+      body: write?.body === undefined ? undefined : JSON.stringify(write.body),
       cache: "no-store",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
