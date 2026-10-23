@@ -20,6 +20,7 @@ so other requests are served in the meantime.
 """
 
 import base64
+import functools
 import hashlib
 import hmac
 import secrets
@@ -70,10 +71,7 @@ def password_problem(password: str, username: str) -> str | None:
 
 def hash_password(password: str) -> str:
     """Hash `password` with a new random salt, as stored in the database."""
-    cost = SCRYPT_COST
-    salt = secrets.token_bytes(_SALT_BYTES)
-    digest = _scrypt(password, salt, cost, _HASH_BYTES)
-    return "$".join((_ALGORITHM, str(cost.n), str(cost.r), str(cost.p), _b64(salt), _b64(digest)))
+    return _new_hash(password, SCRYPT_COST)
 
 
 def verify_password(password: str, stored: str) -> bool:
@@ -92,6 +90,28 @@ def verify_password(password: str, stored: str) -> bool:
     except ValueError:
         return False
     return len(expected) > 0 and hmac.compare_digest(found, expected)
+
+
+def dummy_password_hash() -> str:
+    """Return a hash that matches no password, made with the current cost.
+
+    Signing in to an unknown, disabled or locked account checks the password
+    against it, so the answer takes as long as for a real account: the time
+    never tells which usernames exist. Computed once per cost, then reused.
+    """
+    return _dummy_hash(SCRYPT_COST)
+
+
+@functools.cache
+def _dummy_hash(cost: ScryptCost) -> str:
+    # The hash of a random secret nobody knows: no password ever matches it.
+    return _new_hash(secrets.token_urlsafe(32), cost)
+
+
+def _new_hash(password: str, cost: ScryptCost) -> str:
+    salt = secrets.token_bytes(_SALT_BYTES)
+    digest = _scrypt(password, salt, cost, _HASH_BYTES)
+    return "$".join((_ALGORITHM, str(cost.n), str(cost.r), str(cost.p), _b64(salt), _b64(digest)))
 
 
 def _scrypt(password: str, salt: bytes, cost: ScryptCost, length: int) -> bytes:

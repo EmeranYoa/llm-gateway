@@ -3400,7 +3400,7 @@
     },
     "/admin/v1/sessions": {
       "post": {
-        "description": "Open a session with a username and a password.\n\nA wrong password, an unknown username and a disabled account all get the\nsame answer, so the answer never tells which usernames exist.",
+        "description": "Open a session with a username and a password.\n\nA wrong password, an unknown username, a disabled account and a locked\naccount all get the same answer, so the answer never tells which usernames exist.",
         "operationId": "sign_in_admin_v1_sessions_post",
         "requestBody": {
           "content": {
@@ -3442,6 +3442,16 @@
               }
             },
             "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many sign-in attempts from this address"
           }
         },
         "summary": "Sign In"

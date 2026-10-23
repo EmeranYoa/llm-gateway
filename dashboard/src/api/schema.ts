@@ -344,8 +344,8 @@ export interface paths {
          * Sign In
          * @description Open a session with a username and a password.
          *
-         *     A wrong password, an unknown username and a disabled account all get the
-         *     same answer, so the answer never tells which usernames exist.
+         *     A wrong password, an unknown username, a disabled account and a locked
+         *     account all get the same answer, so the answer never tells which usernames exist.
          */
         post: operations["sign_in_admin_v1_sessions_post"];
         delete?: never;
@@ -2346,6 +2346,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too many sign-in attempts from this address */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };

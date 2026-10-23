@@ -555,6 +555,7 @@ Tests go through the HTTP API: upstream providers are mocked with [respx](https:
 - **Identical concurrent requests all call a provider.** Before the first answer is stored, each of them is a miss; only the first answer is kept.
 - **The cache needs Redis database 0**, where Redis creates its vector indexes.
 - **The dashboard is for operators only.** Tenants cannot log in to see their own usage yet.
+- **The sign-in limit per client address is per admin API process.** 20 attempts per address within 15 minutes are counted in memory: several admin API processes would each allow 20, and a restart forgets the count. The lock of an account after 5 failed sign-ins is stored in PostgreSQL and shared by every process.
 - **Statistics are computed on demand**, over 30 days at most. On a very large usage log, pre-aggregated tables would be faster.
 - **Costs are only as accurate as the configured prices.** Prices change: check them on each provider's pricing page.
 - **A revoked key keeps working up to 60 s** on each gateway instance, until its cache entry expires (`AUTH_CACHE_TTL`). The cache is per instance.

@@ -13,6 +13,8 @@ Operators sign in with a username and a password (`sessions.py`). The first
 account is created with a one-time setup token printed at startup (`setup.py`).
 With `OPERATOR_RECOVERY=true`, a one-time recovery token gives back access to an
 account whose password is lost (`recovery.py`).
+Sign-in attempts are limited per client address in memory (`sign_in_limits.py`):
+each admin API process counts its own.
 """
 
 import logging
@@ -40,6 +42,7 @@ from app.admin_api.one_time_tokens import OneTimeToken
 from app.admin_api.recovery import RecoveryMode, announce_recovery_token
 from app.admin_api.routes import router
 from app.admin_api.setup import announce_setup_token
+from app.admin_api.sign_in_limits import AddressLimiter, Clock, utc_now
 from app.api.routes import error_response, validation_error_handler
 from app.auth.authenticator import AuthenticationUnavailable
 from app.auth.sessions import InvalidSession
@@ -51,9 +54,10 @@ from app.storage.redis_client import create_redis_client
 logger = logging.getLogger(__name__)
 
 
-def create_admin_app(settings: Settings | None = None) -> FastAPI:
+def create_admin_app(settings: Settings | None = None, *, clock: Clock = utc_now) -> FastAPI:
     """Build the admin API application.
 
+    `clock` gives the time of the sign-in limits; tests pass a fake one.
     Raises `ConfigError` when the gateway configuration is invalid, like the gateway.
     """
     settings = settings or Settings()
@@ -79,6 +83,8 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     app.state.gate = TargetGate(redis_client, config.cooldown, config.breaker)
     app.state.setup_token = setup_token
     app.state.recovery = recovery_mode
+    app.state.clock = clock
+    app.state.sign_in_limiter = AddressLimiter()
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(InvalidSession, invalid_session_handler)
     app.add_exception_handler(AuthenticationUnavailable, authentication_unavailable_handler)

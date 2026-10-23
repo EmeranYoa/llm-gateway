@@ -7,6 +7,11 @@ is unique whatever the case: "Alice" and "alice" are the same account.
 
 Sessions are looked up on every admin request, with no cache: signing out,
 disabling an account or the end of a session takes effect at once.
+
+Password guessing is slowed down by a lock: 5 failed sign-ins within 15 minutes
+lock the account for 15 minutes, even for the right password. The counter and
+the lock change in one UPDATE statement, so concurrent failures are never lost.
+The time comes from the caller (`now`), so tests can move it forward.
 """
 
 import datetime as dt
@@ -21,21 +26,30 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    case,
     delete,
     exists,
     func,
     insert,
+    or_,
     select,
     text,
     update,
 )
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql import ColumnElement
 
 from app.auth.keys import hash_key
 from app.auth.sessions import SESSION_LIFETIME, generate_session_token
 from app.storage.admin_actions import Action, Actor, record_action
 from app.storage.db import Base
+
+MAX_FAILED_SIGN_INS = 5
+"""Failed sign-ins, within `FAILED_SIGN_IN_WINDOW`, that lock an account."""
+FAILED_SIGN_IN_WINDOW = dt.timedelta(minutes=15)
+"""A failure this long after the first counted one starts a new count."""
+LOCK_DURATION = dt.timedelta(minutes=15)
 
 
 class OperatorRow(Base):
@@ -52,7 +66,10 @@ class OperatorRow(Base):
     """Language of the dashboard chosen by the operator; NULL: the browser's language."""
     enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
     failed_attempts: Mapped[int] = mapped_column(server_default="0")
+    """Failed sign-ins since `first_failure_at`."""
+    first_failure_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     locked_until: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    """Every sign-in fails until then, even with the right password."""
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
     last_sign_in_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -93,6 +110,11 @@ class OperatorCredentials:
     username: str
     password_hash: str
     enabled: bool
+    locked_until: dt.datetime | None
+
+    def locked_at(self, now: dt.datetime) -> bool:
+        """Return True when the account is locked at `now`."""
+        return self.locked_until is not None and now < self.locked_until
 
 
 @dataclass(frozen=True)
@@ -177,11 +199,63 @@ async def create_first_operator(
 async def find_credentials(engine: AsyncEngine, username: str) -> OperatorCredentials | None:
     """Return the account named `username` (whatever the case), or None when there is none."""
     query = select(
-        OperatorRow.id, OperatorRow.username, OperatorRow.password_hash, OperatorRow.enabled
+        OperatorRow.id,
+        OperatorRow.username,
+        OperatorRow.password_hash,
+        OperatorRow.enabled,
+        OperatorRow.locked_until,
     ).where(func.lower(OperatorRow.username) == func.lower(username))
     async with engine.connect() as connection:
         row = (await connection.execute(query)).first()
     return None if row is None else OperatorCredentials(*row)
+
+
+async def record_failed_sign_in(
+    engine: AsyncEngine, operator_id: int, now: dt.datetime
+) -> dt.datetime | None:
+    """Count a wrong password at `now`, and lock the account at the fifth failure.
+
+    Returns the end of the lock when this failure locked the account, else None.
+    A failure while the account is locked changes nothing: the lock is not extended.
+
+    One UPDATE statement reads and writes the counter. PostgreSQL locks the row
+    while it updates it: a concurrent update waits, then starts again from the
+    new values, so concurrent failures all count.
+    """
+    new_window = or_(
+        OperatorRow.first_failure_at.is_(None),
+        OperatorRow.first_failure_at <= now - FAILED_SIGN_IN_WINDOW,
+    )
+    # Every SET expression reads the values from before the update.
+    failures = case((new_window, 1), else_=OperatorRow.failed_attempts + 1)
+    statement = (
+        update(OperatorRow)
+        .where(OperatorRow.id == operator_id, _not_locked_at(now))
+        .values(
+            failed_attempts=failures,
+            first_failure_at=case((new_window, now), else_=OperatorRow.first_failure_at),
+            locked_until=case((failures >= MAX_FAILED_SIGN_INS, now + LOCK_DURATION), else_=None),
+        )
+        .returning(OperatorRow.locked_until)
+    )
+    async with engine.begin() as connection:
+        return await connection.scalar(statement)
+
+
+async def clear_failed_sign_ins(engine: AsyncEngine, operator_id: int, now: dt.datetime) -> bool:
+    """Reset the failure counter after a right password: the sign-in can go on.
+
+    Returns False, and changes nothing, when the account was locked or disabled
+    in the meantime (by concurrent failures, for example): the sign-in must fail.
+    """
+    statement = (
+        update(OperatorRow)
+        .where(OperatorRow.id == operator_id, OperatorRow.enabled, _not_locked_at(now))
+        .values(failed_attempts=0, first_failure_at=None, locked_until=None)
+        .returning(OperatorRow.id)
+    )
+    async with engine.begin() as connection:
+        return await connection.scalar(statement) is not None
 
 
 async def open_session(engine: AsyncEngine, operator_id: int) -> NewSession:
@@ -257,6 +331,7 @@ async def recover_operator(
                     must_change_password=True,
                     enabled=True,
                     failed_attempts=0,
+                    first_failure_at=None,
                     locked_until=None,
                 )
                 .returning(OperatorRow.id, OperatorRow.username)
@@ -408,6 +483,10 @@ async def _close_sessions(connection: AsyncConnection, operator_id: int) -> None
     await connection.execute(
         delete(OperatorSessionRow).where(OperatorSessionRow.operator_id == operator_id)
     )
+
+
+def _not_locked_at(now: dt.datetime) -> ColumnElement[bool]:
+    return or_(OperatorRow.locked_until.is_(None), OperatorRow.locked_until <= now)
 
 
 async def _insert_operator(
