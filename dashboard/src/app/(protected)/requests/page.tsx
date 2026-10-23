@@ -16,6 +16,7 @@ import {
 import { TimeZoneName } from "@/components/local-time";
 import { RequestsPagination } from "@/components/requests/pagination";
 import { RequestsTable } from "@/components/requests/requests-table";
+import { getI18n } from "@/lib/i18n/server";
 import {
   parseRequestFilters,
   type RequestFilters,
@@ -35,6 +36,7 @@ export default async function RequestsPage({
 }: PageProps<"/requests">) {
   const { filters, cursor } = parseRequestFilters(await searchParams);
 
+  const { locale } = await getI18n();
   const [loaded, tenantNames] = await Promise.all([
     loadPage(filters, cursor).catch(keepApiError),
     loadTenantNames(),
@@ -50,6 +52,7 @@ export default async function RequestsPage({
         requests={result.page.items}
         filters={filters}
         cursor={cursor}
+        locale={locale}
       />
       <RequestsPagination
         filters={filters}
@@ -58,7 +61,9 @@ export default async function RequestsPage({
       />
     </div>
   ) : (
-    loaded instanceof AdminApiError && <ApiErrorNotice error={loaded} />
+    loaded instanceof AdminApiError && (
+      <ApiErrorNotice error={loaded} locale={locale} />
+    )
   );
 
   return (

@@ -1,19 +1,27 @@
 import type { Metadata } from "next";
 
+import { LocaleProvider } from "@/lib/i18n/client";
+import { getI18n, getLocale } from "@/lib/i18n/server";
+
 import "./globals.css";
 
-export const metadata: Metadata = {
-  title: "LLM Gateway admin",
-  description: "Usage, costs and keys of the LLM gateway.",
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const { t } = await getI18n();
+  return { title: t("app.title"), description: t("app.description") };
+}
 
-export default function RootLayout({
+/**
+ * The language of the request (`lang` cookie, else `Accept-Language`) sets
+ * the `lang` of the page and is given to client components.
+ */
+export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  const locale = await getLocale();
   return (
-    <html lang="en">
+    <html lang={locale}>
       <body className="min-h-screen bg-slate-50 text-slate-900 antialiased">
-        {children}
+        <LocaleProvider locale={locale}>{children}</LocaleProvider>
       </body>
     </html>
   );

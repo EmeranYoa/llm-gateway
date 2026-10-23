@@ -7,8 +7,9 @@ import {
   formatDuration,
   formatQuota,
   formatRate,
-  NO_VALUE,
+  noValue,
 } from "@/lib/format";
+import type { Locale } from "@/lib/i18n/locale";
 import { type Period, PERIOD_LABELS } from "@/lib/period";
 import {
   TARGET_HEALTH_DEFINITIONS,
@@ -76,9 +77,21 @@ function Figure({
   );
 }
 
-function Count({ label, count }: { label: string; count: number }) {
+function Count({
+  label,
+  count,
+  locale,
+}: {
+  label: string;
+  count: number;
+  locale: Locale;
+}) {
   return (
-    <Figure label={label} value={formatCount(count)} highlight={count > 0} />
+    <Figure
+      label={label}
+      value={formatCount(locale, count)}
+      highlight={count > 0}
+    />
   );
 }
 
@@ -96,9 +109,11 @@ function SubHeading({ title, children }: { title?: string; children: string }) {
 function PeriodStatistics({
   statistics: s,
   period,
+  locale,
 }: {
   statistics: Statistics;
   period: Period;
+  locale: Locale;
 }) {
   return (
     <section aria-label="Statistics of the period">
@@ -108,50 +123,72 @@ function PeriodStatistics({
       <dl className="text-sm">
         <Figure
           label="Calls"
-          value={formatCount(s.calls)}
+          value={formatCount(locale, s.calls)}
           title={DEFINITIONS.targetCalls}
         />
         <Figure
           label="Success rate"
           value={
-            s.success_rate === null ? NO_VALUE : formatRate(s.success_rate)
+            s.success_rate === null
+              ? noValue(locale)
+              : formatRate(locale, s.success_rate)
           }
           title={DEFINITIONS.targetSuccessRate}
         />
         <Figure
           label="Latency p50 / p95"
-          value={`${formatDuration(s.latency_p50_ms)} / ${formatDuration(s.latency_p95_ms)}`}
+          value={`${formatDuration(locale, s.latency_p50_ms)} / ${formatDuration(locale, s.latency_p95_ms)}`}
           title={DEFINITIONS.targetLatency}
         />
       </dl>
       <SubHeading title={DEFINITIONS.targetFailures}>Failures</SubHeading>
       <dl className="text-sm">
-        <Count label="Rate limited (429)" count={s.rate_limited} />
-        <Count label="Timeouts" count={s.timeout} />
-        <Count label="Unavailable" count={s.unavailable} />
-        <Count label="Misconfigured" count={s.misconfigured} />
-        <Count label="Interrupted streams" count={s.interrupted} />
-        <Count label="Cancelled by the client" count={s.cancelled} />
+        <Count
+          locale={locale}
+          label="Rate limited (429)"
+          count={s.rate_limited}
+        />
+        <Count locale={locale} label="Timeouts" count={s.timeout} />
+        <Count locale={locale} label="Unavailable" count={s.unavailable} />
+        <Count locale={locale} label="Misconfigured" count={s.misconfigured} />
+        <Count
+          locale={locale}
+          label="Interrupted streams"
+          count={s.interrupted}
+        />
+        <Count
+          locale={locale}
+          label="Cancelled by the client"
+          count={s.cancelled}
+        />
       </dl>
       <SubHeading title={DEFINITIONS.targetSkips}>Skipped</SubHeading>
       <dl className="text-sm">
-        <Count label="Cooldown" count={s.skipped_cooldown} />
-        <Count label="Breaker open" count={s.skipped_breaker} />
-        <Count label="Quota full" count={s.skipped_quota} />
+        <Count locale={locale} label="Cooldown" count={s.skipped_cooldown} />
+        <Count locale={locale} label="Breaker open" count={s.skipped_breaker} />
+        <Count locale={locale} label="Quota full" count={s.skipped_quota} />
       </dl>
       <SubHeading title={DEFINITIONS.targetRequestErrors}>
         Caused by the request
       </SubHeading>
       <dl className="text-sm">
-        <Count label="Invalid requests" count={s.invalid_request} />
-        <Count label="Too large for the target" count={s.context_too_large} />
+        <Count
+          locale={locale}
+          label="Invalid requests"
+          count={s.invalid_request}
+        />
+        <Count
+          locale={locale}
+          label="Too large for the target"
+          count={s.context_too_large}
+        />
       </dl>
     </section>
   );
 }
 
 /** How much of a quota is used, as text and as a bar (the bar is decoration only). */
-function QuotaValue({ quota }: { quota: Quota }) {
+function QuotaValue({ quota, locale }: { quota: Quota; locale: Locale }) {
   const share =
     quota.limit && quota.used !== null
       ? Math.min(1, quota.used / quota.limit)
@@ -169,7 +206,7 @@ function QuotaValue({ quota }: { quota: Quota }) {
           />
         </span>
       )}
-      {formatQuota(quota.used, quota.limit)}
+      {formatQuota(locale, quota.used, quota.limit)}
     </span>
   );
 }
@@ -188,9 +225,15 @@ function CooldownValue({ cooldown }: { cooldown: LiveState["cooldown"] }) {
   );
 }
 
-function BreakerValue({ breaker }: { breaker: LiveState["breaker"] }) {
+function BreakerValue({
+  breaker,
+  locale,
+}: {
+  breaker: LiveState["breaker"];
+  locale: Locale;
+}) {
   if (breaker === null) {
-    return NO_VALUE;
+    return noValue(locale);
   }
   if (breaker.state === "open") {
     return breaker.open_until === null ? (
@@ -209,7 +252,13 @@ function BreakerValue({ breaker }: { breaker: LiveState["breaker"] }) {
   return "Closed";
 }
 
-function LiveStateSection({ live }: { live: LiveState | null }) {
+function LiveStateSection({
+  live,
+  locale,
+}: {
+  live: LiveState | null;
+  locale: Locale;
+}) {
   if (live === null) {
     return (
       <section aria-label="Live state">
@@ -241,7 +290,7 @@ function LiveStateSection({ live }: { live: LiveState | null }) {
             />
             <Figure
               label="Circuit breaker"
-              value={<BreakerValue breaker={live.breaker} />}
+              value={<BreakerValue breaker={live.breaker} locale={locale} />}
               title={DEFINITIONS.breaker}
               highlight={live.breaker?.state !== "closed"}
             />
@@ -249,17 +298,17 @@ function LiveStateSection({ live }: { live: LiveState | null }) {
         )}
         <Figure
           label="Requests per minute"
-          value={<QuotaValue quota={live.rpm} />}
+          value={<QuotaValue locale={locale} quota={live.rpm} />}
           title={DEFINITIONS.rpm}
         />
         <Figure
           label="Tokens per minute"
-          value={<QuotaValue quota={live.tpm} />}
+          value={<QuotaValue locale={locale} quota={live.tpm} />}
           title={DEFINITIONS.tpm}
         />
         <Figure
           label="Requests per day"
-          value={<QuotaValue quota={live.rpd} />}
+          value={<QuotaValue locale={locale} quota={live.rpd} />}
           title={DEFINITIONS.rpd}
         />
         <Figure
@@ -275,9 +324,11 @@ function LiveStateSection({ live }: { live: LiveState | null }) {
 export function TargetCard({
   target,
   period,
+  locale,
 }: {
   target: TargetReport;
   period: Period;
+  locale: Locale;
 }) {
   const name = `${target.provider}/${target.model}`;
   return (
@@ -293,8 +344,12 @@ export function TargetCard({
         <TargetHealthBadges target={target} />
       </header>
       <div className="mt-3 grid gap-6 md:grid-cols-2">
-        <PeriodStatistics statistics={target.statistics} period={period} />
-        <LiveStateSection live={target.live} />
+        <PeriodStatistics
+          statistics={target.statistics}
+          period={period}
+          locale={locale}
+        />
+        <LiveStateSection live={target.live} locale={locale} />
       </div>
     </article>
   );

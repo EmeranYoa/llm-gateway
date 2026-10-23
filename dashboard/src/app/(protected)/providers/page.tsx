@@ -11,6 +11,8 @@ import { TimeZoneName } from "@/components/local-time";
 import { HEALTH_TONES, TargetCard } from "@/components/providers/target-card";
 import { Badge } from "@/components/badge";
 import { formatCount } from "@/lib/format";
+import { getI18n } from "@/lib/i18n/server";
+import type { Locale } from "@/lib/i18n/locale";
 import { type Period, parsePeriod } from "@/lib/period";
 import {
   TARGET_HEALTH_LABELS,
@@ -29,6 +31,7 @@ export default async function ProvidersPage({
 }: PageProps<"/providers">) {
   const period = parsePeriod((await searchParams).period);
 
+  const { locale } = await getI18n();
   const loaded = await loadTargets(period).catch(keepApiError);
   const report = loaded instanceof AdminApiError ? null : loaded;
 
@@ -48,10 +51,16 @@ export default async function ProvidersPage({
             <p className="text-xs text-slate-600">
               <TimeZoneName />
             </p>
-            <TargetsList targets={report.targets.targets} period={period} />
+            <TargetsList
+              targets={report.targets.targets}
+              period={period}
+              locale={locale}
+            />
           </div>
         ) : (
-          loaded instanceof AdminApiError && <ApiErrorNotice error={loaded} />
+          loaded instanceof AdminApiError && (
+            <ApiErrorNotice error={loaded} locale={locale} />
+          )
         )}
       </AutoRefresh>
     </section>
@@ -72,9 +81,11 @@ async function loadTargets(
 function TargetsList({
   targets,
   period,
+  locale,
 }: {
   targets: TargetsReport["targets"];
   period: Period;
+  locale: Locale;
 }) {
   if (targets.length === 0) {
     return (
@@ -86,13 +97,14 @@ function TargetsList({
   }
   return (
     <>
-      <HealthSummary targets={targets} />
+      <HealthSummary targets={targets} locale={locale} />
       <div className="flex flex-col gap-4">
         {targets.map((target) => (
           <TargetCard
             key={`${target.provider}/${target.model}`}
             target={target}
             period={period}
+            locale={locale}
           />
         ))}
       </div>
@@ -101,7 +113,13 @@ function TargetsList({
 }
 
 /** How many targets are in each state, by their most blocking reason. */
-function HealthSummary({ targets }: { targets: TargetsReport["targets"] }) {
+function HealthSummary({
+  targets,
+  locale,
+}: {
+  targets: TargetsReport["targets"];
+  locale: Locale;
+}) {
   const counts = new Map<TargetHealth, number>();
   for (const target of targets) {
     const main = targetHealth(target)[0];
@@ -115,7 +133,7 @@ function HealthSummary({ targets }: { targets: TargetsReport["targets"] }) {
       {[...counts].map(([health, count]) => (
         <li key={health}>
           <Badge tone={HEALTH_TONES[health]}>
-            {TARGET_HEALTH_LABELS[health]}: {formatCount(count)}
+            {TARGET_HEALTH_LABELS[health]}: {formatCount(locale, count)}
           </Badge>
         </li>
       ))}

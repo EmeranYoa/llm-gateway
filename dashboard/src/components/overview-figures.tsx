@@ -6,11 +6,12 @@ import {
   formatMoney,
   formatRate,
 } from "@/lib/format";
+import type { Locale } from "@/lib/i18n/locale";
 
 import { StatCard } from "./stat-card";
 
-function plural(count: number, word: string): string {
-  return `${formatCount(count)} ${word}${count === 1 ? "" : "s"}`;
+function plural(locale: Locale, count: number, word: string): string {
+  return `${formatCount(locale, count)} ${word}${count === 1 ? "" : "s"}`;
 }
 
 function FigureGroup({
@@ -33,7 +34,13 @@ function FigureGroup({
 }
 
 /** The key figures of an overview, in four groups: traffic, speed, cost, cache. */
-export function OverviewFigures({ overview }: { overview: Overview }) {
+export function OverviewFigures({
+  overview,
+  locale,
+}: {
+  overview: Overview;
+  locale: Locale;
+}) {
   const {
     latency_ms: latency,
     time_to_first_token_ms: firstToken,
@@ -45,19 +52,19 @@ export function OverviewFigures({ overview }: { overview: Overview }) {
       <FigureGroup title="Traffic">
         <StatCard
           label="Requests"
-          value={formatCount(overview.requests)}
+          value={formatCount(locale, overview.requests)}
           definition={DEFINITIONS.requests}
-          detail={`${formatCount(overview.answered)} answered`}
+          detail={`${formatCount(locale, overview.answered)} answered`}
         />
         <StatCard
           label="Error rate"
-          value={formatRate(overview.error_rate)}
+          value={formatRate(locale, overview.error_rate)}
           definition={DEFINITIONS.errorRate}
-          detail={`${formatCount(overview.failed)} failed. Not counted: ${plural(overview.client_error, "client error")}, ${formatCount(overview.cancelled)} cancelled.`}
+          detail={`${formatCount(locale, overview.failed)} failed. Not counted: ${plural(locale, overview.client_error, "client error")}, ${formatCount(locale, overview.cancelled)} cancelled.`}
         />
         <StatCard
           label="Fallback rate"
-          value={formatRate(overview.fallback_rate)}
+          value={formatRate(locale, overview.fallback_rate)}
           definition={DEFINITIONS.fallbackRate}
         />
       </FigureGroup>
@@ -65,19 +72,19 @@ export function OverviewFigures({ overview }: { overview: Overview }) {
       <FigureGroup title="Speed">
         <StatCard
           label="Latency p50"
-          value={formatDuration(latency.p50)}
+          value={formatDuration(locale, latency.p50)}
           definition={DEFINITIONS.latency}
-          detail={`p95: ${formatDuration(latency.p95)}`}
+          detail={`p95: ${formatDuration(locale, latency.p95)}`}
         />
         <StatCard
           label="Time to first token p50"
-          value={formatDuration(firstToken.p50)}
+          value={formatDuration(locale, firstToken.p50)}
           definition={DEFINITIONS.timeToFirstToken}
-          detail={`p95: ${formatDuration(firstToken.p95)} · streams only`}
+          detail={`p95: ${formatDuration(locale, firstToken.p95)} · streams only`}
         />
         <StatCard
           label="Cache hit latency p50"
-          value={formatDuration(overview.cache_hit_latency_ms.p50)}
+          value={formatDuration(locale, overview.cache_hit_latency_ms.p50)}
           definition={DEFINITIONS.cacheHitLatency}
         />
       </FigureGroup>
@@ -85,16 +92,16 @@ export function OverviewFigures({ overview }: { overview: Overview }) {
       <FigureGroup title="Tokens and cost">
         <StatCard
           label="Tokens"
-          value={formatCount(overview.tokens)}
+          value={formatCount(locale, overview.tokens)}
           definition={DEFINITIONS.tokens}
         />
         <StatCard
           label="Cost"
-          value={formatMoney(overview.cost_usd)}
+          value={formatMoney(locale, overview.cost_usd)}
           definition={DEFINITIONS.cost}
           warning={
             unpriced > 0
-              ? `${plural(unpriced, "request")} without a price, not included`
+              ? `${plural(locale, unpriced, "request")} without a price, not included`
               : undefined
           }
         />
@@ -103,18 +110,18 @@ export function OverviewFigures({ overview }: { overview: Overview }) {
       <FigureGroup title="Cache">
         <StatCard
           label="Cache hit rate"
-          value={formatRate(overview.cache_hit_rate)}
+          value={formatRate(locale, overview.cache_hit_rate)}
           definition={DEFINITIONS.cacheHitRate}
-          detail={`${plural(overview.cache_hits, "hit")} of ${plural(overview.cache_requests, "cached request")}`}
+          detail={`${plural(locale, overview.cache_hits, "hit")} of ${plural(locale, overview.cache_requests, "cached request")}`}
         />
         <StatCard
           label="Saved tokens"
-          value={formatCount(overview.saved_tokens)}
+          value={formatCount(locale, overview.saved_tokens)}
           definition={DEFINITIONS.savedTokens}
         />
         <StatCard
           label="Saved cost"
-          value={formatMoney(overview.saved_cost_usd)}
+          value={formatMoney(locale, overview.saved_cost_usd)}
           definition={DEFINITIONS.savedCost}
         />
       </FigureGroup>

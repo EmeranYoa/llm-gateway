@@ -2,6 +2,7 @@
 
 import { useBrowserTimeZone } from "@/lib/browser-hooks";
 import { formatDateTime } from "@/lib/format";
+import { useLocale } from "@/lib/i18n/client";
 
 /**
  * Times of the admin API (UTC) shown in the browser's time zone. On the server
@@ -20,8 +21,11 @@ export function LocalDateTime({
   seconds?: boolean;
 }) {
   const timeZone = useBrowserTimeZone();
+  const locale = useLocale();
   return (
-    <time dateTime={iso}>{formatDateTime(iso, timeZone, { seconds })}</time>
+    <time dateTime={iso}>
+      {formatDateTime(locale, iso, timeZone, { seconds })}
+    </time>
   );
 }
 

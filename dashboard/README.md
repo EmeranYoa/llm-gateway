@@ -49,20 +49,42 @@ browser's time zone.
 
 Reuse these when you add a screen:
 
-| Piece                                                                        | What it does                                                                                                                                                                                                                                                                                                   |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AutoRefresh` (`components/auto-refresh.tsx`)                                | Wraps the data of a server page. Props: `updatedAt` (ISO), `failed`, `dataKey` (the filters), `intervalMs` (default 10 s). Calls `router.refresh()`, shows "Updated N s ago" and a pause button, pauses while the tab is hidden, and keeps the last data with an "Update failed" badge when a refresh fails.   |
-| `PeriodFilter`, `TenantFilter` (`components/filters.tsx`)                    | Write `?period=` and `?tenant=` to the URL, other params kept. Props: `value` (from the server page), and `tenants` (names) for `TenantFilter`. Parse the params with `parsePeriod` / `parseTenant` (`lib/period.ts`).                                                                                         |
-| `RequestStatusFilter`, `AliasFilter` (`components/filters.tsx`)              | Write `?status=` and `?alias=`. Every filter removes `?cursor=`, so a list starts again from its first page. Parse the params of the Requests screen with `parseRequestFilters` (`lib/request-filters.ts`), which also builds the links (`requestsHref`, `requestHref`).                                       |
-| `Badge` (`components/badge.tsx`)                                             | A short coloured label with a tooltip (`tone`, `title`). The text always says what the colour means.                                                                                                                                                                                                           |
-| `StatCard` (`components/stat-card.tsx`)                                      | One figure. Props: `label`, `value` (formatted), `definition` (tooltip), optional `detail` and `warning`. Definitions live in `lib/definitions.ts`.                                                                                                                                                            |
-| `BarChartCard` (`components/bar-chart-card.tsx`)                             | A titled Recharts bar chart. Props: `title`, `data` (`label`, `tooltipLabel`, one value per series), `series` (`key`, `name`, `color`), `formatValue`, optional `formatTick`, `note` and `integer`. Animates on the first render only.                                                                         |
-| `LocalDateTime`, `TimeZoneName`, `PeriodRange` (`components/local-time.tsx`) | Show UTC times of the admin API in the browser's time zone (`seconds` prop for short events), and name it.                                                                                                                                                                                                     |
-| `lib/format.ts`                                                              | `formatMoney` (`null` → `unknown`), `formatMoneyTick`, `formatRate`, `formatDuration` (`null` → `n/a`), `formatCount`, `formatAge`, `formatDateTime` (optional seconds), `formatBucket`, `formatQuota` (`12 / 30`, `no limit`), `formatSimilarity`. English (`en-US`) everywhere, so server and browser agree. |
+| Piece                                                                        | What it does                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AutoRefresh` (`components/auto-refresh.tsx`)                                | Wraps the data of a server page. Props: `updatedAt` (ISO), `failed`, `dataKey` (the filters), `intervalMs` (default 10 s). Calls `router.refresh()`, shows "Updated N s ago" and a pause button, pauses while the tab is hidden, and keeps the last data with an "Update failed" badge when a refresh fails.                                        |
+| `PeriodFilter`, `TenantFilter` (`components/filters.tsx`)                    | Write `?period=` and `?tenant=` to the URL, other params kept. Props: `value` (from the server page), and `tenants` (names) for `TenantFilter`. Parse the params with `parsePeriod` / `parseTenant` (`lib/period.ts`).                                                                                                                              |
+| `RequestStatusFilter`, `AliasFilter` (`components/filters.tsx`)              | Write `?status=` and `?alias=`. Every filter removes `?cursor=`, so a list starts again from its first page. Parse the params of the Requests screen with `parseRequestFilters` (`lib/request-filters.ts`), which also builds the links (`requestsHref`, `requestHref`).                                                                            |
+| `Badge` (`components/badge.tsx`)                                             | A short coloured label with a tooltip (`tone`, `title`). The text always says what the colour means.                                                                                                                                                                                                                                                |
+| `StatCard` (`components/stat-card.tsx`)                                      | One figure. Props: `label`, `value` (formatted), `definition` (tooltip), optional `detail` and `warning`. Definitions live in `lib/definitions.ts`.                                                                                                                                                                                                 |
+| `BarChartCard` (`components/bar-chart-card.tsx`)                             | A titled Recharts bar chart. Props: `title`, `data` (`label`, `tooltipLabel`, one value per series), `series` (`key`, `name`, `color`), `formatValue`, optional `formatTick`, `note` and `integer`. Animates on the first render only.                                                                                                              |
+| `LocalDateTime`, `TimeZoneName`, `PeriodRange` (`components/local-time.tsx`) | Show UTC times of the admin API in the browser's time zone (`seconds` prop for short events), and name it.                                                                                                                                                                                                                                          |
+| `lib/format.ts`                                                              | Every formatter takes the language first: `formatMoney(locale, usd)` (`null` → `unknown`), `formatMoneyTick`, `formatRate`, `formatDuration` (`null` → `n/a`), `formatCount`, `formatAge`, `formatDateTime` (optional seconds), `formatBucket`, `formatQuota` (`12 / 30`, `no limit`), `formatSimilarity`, `noValue`. `Intl` in `en-US` or `fr-FR`. |
 
 A server page loads its data with `src/api/client.ts`, turns an `AdminApiError`
 into a value with `.catch(keepApiError)`, and passes the result to `AutoRefresh`
 (see `src/app/(protected)/tenants/page.tsx`).
+
+## Languages
+
+The dashboard speaks English and French. There is no i18n library:
+
+- Texts live in typed dictionaries, `src/messages/en.ts` (the reference) and
+  `src/messages/fr.ts`. `fr.ts` is typed from `en.ts`: a missing or extra key
+  fails `bun run typecheck`. A message can have `{placeholders}` and plural
+  forms (`{ one, other }`, chosen with `Intl.PluralRules`).
+- `t(key, values)` reads a message by its dotted key (`t("nav.overview")`).
+  Keys and placeholders are checked by the compiler. Server pages call
+  `const { locale, t } = await getI18n()` (`lib/i18n/server.ts`) and pass
+  `locale` to their components; client components call `useTranslator()` and
+  `useLocale()` (`lib/i18n/client.tsx`).
+- The language is, in order: the `lang` cookie written by the selector of the
+  nav bar (one year), the browser's `Accept-Language` header, English
+  (`resolveLocale` in `lib/i18n/locale.ts`).
+- Errors of the admin API are translated from their `code`
+  (`lib/i18n/api-errors.ts`); an unknown code shows a generic message and the
+  English detail of the admin API.
+- French texts follow French typography: a no-break space (written `\u00a0`) before
+  `:`, `?`, `!`, `%` and units.
 
 ## Environment variables
 

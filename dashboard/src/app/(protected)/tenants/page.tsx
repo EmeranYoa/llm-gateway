@@ -4,6 +4,7 @@ import { AutoRefresh } from "@/components/auto-refresh";
 import { PeriodFilter } from "@/components/filters";
 import { PeriodRange } from "@/components/local-time";
 import { TenantsTable } from "@/components/tenants-table";
+import { getI18n } from "@/lib/i18n/server";
 import { parsePeriod } from "@/lib/period";
 
 /**
@@ -15,6 +16,7 @@ export default async function TenantsPage({
 }: PageProps<"/tenants">) {
   const period = parsePeriod((await searchParams).period);
 
+  const { locale } = await getI18n();
   const report = await getTenantStatistics(period).catch(keepApiError);
   const list = report instanceof AdminApiError ? null : report;
 
@@ -32,10 +34,16 @@ export default async function TenantsPage({
         {list ? (
           <div className="flex flex-col gap-3">
             <PeriodRange start={list.start} end={list.end} />
-            <TenantsTable tenants={list.tenants} period={period} />
+            <TenantsTable
+              tenants={list.tenants}
+              period={period}
+              locale={locale}
+            />
           </div>
         ) : (
-          report instanceof AdminApiError && <ApiErrorNotice error={report} />
+          report instanceof AdminApiError && (
+            <ApiErrorNotice error={report} locale={locale} />
+          )
         )}
       </AutoRefresh>
     </section>

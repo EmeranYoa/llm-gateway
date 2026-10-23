@@ -216,7 +216,10 @@ describe("RequestsPage", () => {
 
     await renderPage({ cursor: "broken" });
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Invalid cursor.");
+    // The message is translated from the error code.
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This page of results is no longer valid.",
+    );
   });
 
   it("still shows the requests when the tenant names cannot be loaded", async () => {

@@ -10,6 +10,7 @@ import { PeriodFilter, TenantFilter } from "@/components/filters";
 import { PeriodRange } from "@/components/local-time";
 import { OverviewCharts } from "@/components/overview-charts";
 import { OverviewFigures } from "@/components/overview-figures";
+import { getI18n } from "@/lib/i18n/server";
 import { parsePeriod, parseTenant } from "@/lib/period";
 
 /**
@@ -21,6 +22,7 @@ export default async function OverviewPage({ searchParams }: PageProps<"/">) {
   const period = parsePeriod(params.period);
   const tenant = parseTenant(params.tenant);
 
+  const { locale } = await getI18n();
   const [report, tenantNames] = await Promise.all([
     getOverview(period, tenant).catch(keepApiError),
     loadTenantNames(),
@@ -46,11 +48,13 @@ export default async function OverviewPage({ searchParams }: PageProps<"/">) {
         {overview ? (
           <div className="flex flex-col gap-6">
             <PeriodRange start={overview.start} end={overview.end} />
-            <OverviewFigures overview={overview} />
+            <OverviewFigures overview={overview} locale={locale} />
             <OverviewCharts series={overview.series} period={period} />
           </div>
         ) : (
-          report instanceof AdminApiError && <ApiErrorNotice error={report} />
+          report instanceof AdminApiError && (
+            <ApiErrorNotice error={report} locale={locale} />
+          )
         )}
       </AutoRefresh>
     </section>

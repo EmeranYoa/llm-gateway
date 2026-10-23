@@ -7,6 +7,7 @@ import { CreateKeyForm } from "@/components/keys/create-key-form";
 import { TimeZoneName } from "@/components/local-time";
 import { TenantKeysPanel } from "@/components/keys/tenant-keys-panel";
 import { TenantList } from "@/components/keys/tenant-list";
+import { getI18n } from "@/lib/i18n/server";
 import { createKeyAction, loadActionsAction } from "@/lib/key-actions";
 
 /**
@@ -33,6 +34,7 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
   const { tenant } = await searchParams;
   const selected = typeof tenant === "string" && tenant !== "" ? tenant : null;
 
+  const { locale } = await getI18n();
   const [names, actions, tenantKeys] = await Promise.all([
     load(listTenantNames),
     load(() => listActions()),
@@ -73,7 +75,7 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
             Tenants
           </h2>
           {"error" in names ? (
-            <ApiErrorNotice error={names.error} />
+            <ApiErrorNotice error={names.error} locale={locale} />
           ) : (
             <TenantList names={names.data} selected={selected} />
           )}
@@ -84,7 +86,7 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
               Select a tenant to see its limits and keys.
             </p>
           ) : "error" in tenantKeys ? (
-            <ApiErrorNotice error={tenantKeys.error} />
+            <ApiErrorNotice error={tenantKeys.error} locale={locale} />
           ) : (
             <TenantKeysPanel data={tenantKeys.data} />
           )}
@@ -99,7 +101,7 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
           History of admin actions
         </h2>
         {"error" in actions ? (
-          <ApiErrorNotice error={actions.error} />
+          <ApiErrorNotice error={actions.error} locale={locale} />
         ) : (
           <ActionHistory
             // A new action changes the first page: start again from it.

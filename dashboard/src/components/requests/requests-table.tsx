@@ -6,8 +6,9 @@ import {
   formatCount,
   formatDuration,
   formatMoney,
-  NO_VALUE,
+  noValue,
 } from "@/lib/format";
+import type { Locale } from "@/lib/i18n/locale";
 import { type RequestFilters, requestHref } from "@/lib/request-filters";
 
 import {
@@ -21,6 +22,7 @@ type RequestsTableProps = {
   /** Filters and page of the list, carried to the detail so its back link returns here. */
   filters: RequestFilters;
   cursor: string | null;
+  locale: Locale;
 };
 
 const HEADERS: { label: string; title?: string; numeric?: boolean }[] = [
@@ -62,6 +64,7 @@ export function RequestsTable({
   requests,
   filters,
   cursor,
+  locale,
 }: RequestsTableProps) {
   if (requests.length === 0) {
     return (
@@ -109,7 +112,7 @@ export function RequestsTable({
               </th>
               <td className="px-3 py-2">
                 {request.tenant ?? (
-                  <span className="text-slate-500">{NO_VALUE}</span>
+                  <span className="text-slate-500">{noValue(locale)}</span>
                 )}
               </td>
               <td className="px-3 py-2 font-mono text-xs">{request.alias}</td>
@@ -117,20 +120,20 @@ export function RequestsTable({
                 <RequestStatusBadge status={request.status} />
               </td>
               <td className="px-3 py-2 text-right tabular-nums">
-                {request.status_code ?? NO_VALUE}
+                {request.status_code ?? noValue(locale)}
               </td>
               <td className="px-3 py-2">
                 <AnsweredBy provider={request.provider} model={request.model} />
               </td>
               <td className="px-3 py-2 text-right tabular-nums">
-                {formatCount(request.attempts)}
+                {formatCount(locale, request.attempts)}
               </td>
               <td className="px-3 py-2">{request.stream ? "yes" : "no"}</td>
               <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">
-                {formatDuration(request.latency_ms)}
+                {formatDuration(locale, request.latency_ms)}
               </td>
               <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">
-                {formatMoney(request.cost_usd)}
+                {formatMoney(locale, request.cost_usd)}
               </td>
               <td className="px-3 py-2">{cacheLabel(request.cache)}</td>
             </tr>

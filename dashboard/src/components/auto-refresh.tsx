@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import { usePageHidden } from "@/lib/browser-hooks";
 import { formatAge } from "@/lib/format";
+import { useLocale } from "@/lib/i18n/client";
 
 /** How often the data of a screen is reloaded. */
 export const REFRESH_INTERVAL_MS = 10_000;
@@ -55,6 +56,7 @@ export function AutoRefresh({
 }: AutoRefreshProps) {
   const router = useRouter();
   const hidden = usePageHidden();
+  const locale = useLocale();
   const [paused, setPaused] = useState(false);
   const [now, setNow] = useState<number | null>(null);
   const [lastGood, setLastGood] = useState<Snapshot | null>(null);
@@ -90,7 +92,9 @@ export function AutoRefresh({
     <div>
       <div className="mb-4 flex flex-wrap items-center gap-3 text-xs text-slate-600">
         {shownUpdatedAt !== null && (
-          <span>Updated {formatAge(ageInSeconds(shownUpdatedAt, now))}</span>
+          <span>
+            Updated {formatAge(locale, ageInSeconds(shownUpdatedAt, now))}
+          </span>
         )}
         {paused ? (
           <span>Auto-refresh paused</span>

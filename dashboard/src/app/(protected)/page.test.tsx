@@ -161,8 +161,9 @@ describe("OverviewPage", () => {
 
     await renderPage({ tenant: "nope" });
 
+    // The message is translated from the error code.
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Unknown tenant 'nope'.",
+      "This tenant does not exist.",
     );
     expect(
       screen.queryByRole("heading", { name: "Requests" }),

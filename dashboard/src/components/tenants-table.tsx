@@ -3,6 +3,7 @@ import Link from "next/link";
 import type { TenantStatistics } from "@/api/client";
 import { DEFINITIONS } from "@/lib/definitions";
 import { formatCount, formatMoney, formatRate } from "@/lib/format";
+import type { Locale } from "@/lib/i18n/locale";
 import type { Period } from "@/lib/period";
 import { overviewHref } from "@/lib/search-params";
 
@@ -10,48 +11,48 @@ type Column = {
   label: string;
   /** Shown as the `title` of the header cell. */
   definition?: string;
-  value: (tenant: TenantStatistics) => string;
+  value: (tenant: TenantStatistics, locale: Locale) => string;
 };
 
 const COLUMNS: Column[] = [
   {
     label: "Requests",
     definition: DEFINITIONS.requests,
-    value: (t) => formatCount(t.requests),
+    value: (t, locale) => formatCount(locale, t.requests),
   },
   {
     label: "Tokens",
     definition: DEFINITIONS.tokens,
-    value: (t) => formatCount(t.tokens),
+    value: (t, locale) => formatCount(locale, t.tokens),
   },
   {
     label: "Cost",
     definition: DEFINITIONS.cost,
     // An unknown price is never counted as 0: say how many answers are left out.
-    value: (t) =>
+    value: (t, locale) =>
       t.unpriced_requests > 0
-        ? `${formatMoney(t.cost_usd)} (${formatCount(t.unpriced_requests)} without a price)`
-        : formatMoney(t.cost_usd),
+        ? `${formatMoney(locale, t.cost_usd)} (${formatCount(locale, t.unpriced_requests)} without a price)`
+        : formatMoney(locale, t.cost_usd),
   },
   {
     label: "Error rate",
     definition: DEFINITIONS.errorRate,
-    value: (t) => formatRate(t.error_rate),
+    value: (t, locale) => formatRate(locale, t.error_rate),
   },
   {
     label: "Cache hits",
     definition: DEFINITIONS.cacheHits,
-    value: (t) => formatCount(t.cache_hits),
+    value: (t, locale) => formatCount(locale, t.cache_hits),
   },
   {
     label: "Saved cost",
     definition: DEFINITIONS.savedCost,
-    value: (t) => formatMoney(t.saved_cost_usd),
+    value: (t, locale) => formatMoney(locale, t.saved_cost_usd),
   },
   {
     label: "Quota refusals",
     definition: DEFINITIONS.quotaRefusals,
-    value: (t) => formatCount(t.quota_refusals),
+    value: (t, locale) => formatCount(locale, t.quota_refusals),
   },
 ];
 
@@ -59,13 +60,14 @@ type TenantsTableProps = {
   tenants: TenantStatistics[];
   /** The period of the figures, carried by the links to the overview. */
   period: Period;
+  locale: Locale;
 };
 
 /**
  * One row per tenant. Clicking a row opens the overview filtered on that tenant
  * and the same period (the tenant name is a link that covers the whole row).
  */
-export function TenantsTable({ tenants, period }: TenantsTableProps) {
+export function TenantsTable({ tenants, period, locale }: TenantsTableProps) {
   if (tenants.length === 0) {
     return (
       <p className="text-sm text-slate-600">
@@ -117,7 +119,7 @@ export function TenantsTable({ tenants, period }: TenantsTableProps) {
                   key={column.label}
                   className="px-4 py-2 text-right text-slate-900 tabular-nums"
                 >
-                  {column.value(tenant)}
+                  {column.value(tenant, locale)}
                 </td>
               ))}
             </tr>

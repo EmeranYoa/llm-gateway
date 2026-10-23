@@ -9,6 +9,8 @@ import {
   formatMoney,
   formatMoneyTick,
 } from "@/lib/format";
+import { useLocale } from "@/lib/i18n/client";
+import type { Locale } from "@/lib/i18n/locale";
 import type { Period } from "@/lib/period";
 
 import { BarChartCard, type ChartPoint } from "./bar-chart-card";
@@ -24,16 +26,17 @@ export function bucketNote(period: Period, timeZone: string): string {
 }
 
 function toChartPoints(
+  locale: Locale,
   series: SeriesPoint[],
   period: Period,
   timeZone: string,
 ): ChartPoint[] {
   return series.map((point) => ({
-    label: formatBucket(point.start, period, timeZone),
+    label: formatBucket(locale, point.start, period, timeZone),
     tooltipLabel:
       period === "24h"
-        ? formatDateTime(point.start, timeZone)
-        : `${formatBucket(point.start, period, timeZone)} (UTC day)`,
+        ? formatDateTime(locale, point.start, timeZone)
+        : `${formatBucket(locale, point.start, period, timeZone)} (UTC day)`,
     requests: point.requests,
     failed: point.failed,
     cost_usd: point.cost_usd,
@@ -50,7 +53,9 @@ export function OverviewCharts({
   period: Period;
 }) {
   const timeZone = useBrowserTimeZone();
-  const data = toChartPoints(series, period, timeZone);
+  const locale = useLocale();
+  const data = toChartPoints(locale, series, period, timeZone);
+  const count = (value: number) => formatCount(locale, value);
   const note = bucketNote(period, timeZone);
 
   return (
@@ -66,7 +71,7 @@ export function OverviewCharts({
           { key: "requests", name: "Requests", color: BLUE },
           { key: "failed", name: "Failed", color: RED },
         ]}
-        formatValue={formatCount}
+        formatValue={count}
         integer
       />
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -75,15 +80,15 @@ export function OverviewCharts({
           note={note}
           data={data}
           series={[{ key: "cost_usd", name: "Cost", color: BLUE }]}
-          formatValue={formatMoney}
-          formatTick={formatMoneyTick}
+          formatValue={(value) => formatMoney(locale, value)}
+          formatTick={(value) => formatMoneyTick(locale, value)}
         />
         <BarChartCard
           title="Cache hits"
           note={note}
           data={data}
           series={[{ key: "cache_hits", name: "Cache hits", color: BLUE }]}
-          formatValue={formatCount}
+          formatValue={count}
           integer
         />
       </div>

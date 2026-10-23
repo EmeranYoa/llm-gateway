@@ -1,125 +1,162 @@
 /**
  * Formatting helpers shared by every screen.
  *
- * Everything is formatted in English (`en-US`), so the server and the browser
- * produce the same text. Dates take an explicit time zone: the admin API
- * returns UTC, and the screens show the browser's time zone (see
- * `useBrowserTimeZone`).
+ * Every formatter takes the language of the page first (`Locale`, see
+ * `lib/i18n`): numbers, money and dates follow `Intl` in `en-US` or `fr-FR`
+ * (`1,250.5` or `1 250,5`), and words come from the dictionaries. The server
+ * and the browser get the same language, so they produce the same text.
+ *
+ * Dates take an explicit time zone: the admin API returns UTC, and the screens
+ * show the browser's time zone (see `useBrowserTimeZone`).
  */
 
+import { INTL_LOCALES, LOCALES, type Locale } from "./i18n/locale";
+import { getTranslator } from "./i18n/translator";
 import type { Period } from "./period";
 
-const LOCALE = "en-US";
-
-/** Shown when a duration or a percentile has no value (nothing was measured). */
-export const NO_VALUE = "n/a";
-
-const COUNT = new Intl.NumberFormat(LOCALE);
-const USD = new Intl.NumberFormat(LOCALE, {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-/** Amounts below one cent keep up to 6 decimals, so they do not show as $0.00. */
-const SMALL_USD = new Intl.NumberFormat(LOCALE, {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 6,
-});
+/** Amounts below this many dollars show as `< $0.000001`. */
 const SMALLEST_USD = 0.000001;
-const PERCENT = new Intl.NumberFormat(LOCALE, {
-  style: "percent",
-  maximumFractionDigits: 1,
-});
 
-/** A whole number with thousands separators: `12,345`. */
-export function formatCount(value: number): string {
-  return COUNT.format(value);
+function numberFormats(intlLocale: string) {
+  const money = {
+    style: "currency",
+    currency: "USD",
+    // `$` in every language: `$1.50`, `1,50 $` (not `1,50 $US`).
+    currencyDisplay: "narrowSymbol",
+  } as const;
+  return {
+    count: new Intl.NumberFormat(intlLocale),
+    usd: new Intl.NumberFormat(intlLocale, {
+      ...money,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }),
+    /** Amounts below one cent keep up to 6 decimals, so they do not show as $0.00. */
+    smallUsd: new Intl.NumberFormat(intlLocale, {
+      ...money,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 6,
+    }),
+    usdTick: new Intl.NumberFormat(intlLocale, {
+      ...money,
+      maximumSignificantDigits: 3,
+    }),
+    percent: new Intl.NumberFormat(intlLocale, {
+      style: "percent",
+      maximumFractionDigits: 1,
+    }),
+    oneDecimal: new Intl.NumberFormat(intlLocale, {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    }),
+    similarity: new Intl.NumberFormat(intlLocale, { maximumFractionDigits: 3 }),
+  };
+}
+
+const FORMATS = Object.fromEntries(
+  LOCALES.map((locale) => [locale, numberFormats(INTL_LOCALES[locale])]),
+) as Record<Locale, ReturnType<typeof numberFormats>>;
+
+/** Shown when a value is missing (nothing was measured): `n/a`, `n.d.`. */
+export function noValue(locale: Locale): string {
+  return getTranslator(locale)("format.noValue");
+}
+
+/** A whole number with thousands separators: `12,345`, `12 345`. */
+export function formatCount(locale: Locale, value: number): string {
+  return FORMATS[locale].count.format(value);
 }
 
 /**
- * A USD amount: `$1,234.50`, `$0.0012` below one cent.
+ * A USD amount: `$1,234.50` (`1 234,50 $`), `$0.0012` below one cent.
  *
  * `null` or `undefined` means the price is not known, which is not the same as
  * free: it gives `unknown`, never `$0.00`.
  */
-export function formatMoney(usd: number | null | undefined): string {
+export function formatMoney(
+  locale: Locale,
+  usd: number | null | undefined,
+): string {
+  const formats = FORMATS[locale];
   if (usd === null || usd === undefined) {
-    return "unknown";
+    return getTranslator(locale)("format.unknown");
   }
   const size = Math.abs(usd);
   if (size === 0 || size >= 0.01) {
-    return USD.format(usd);
+    return formats.usd.format(usd);
   }
   if (size < SMALLEST_USD) {
-    return `< ${SMALL_USD.format(SMALLEST_USD)}`;
+    return getTranslator(locale)("format.lessThan", {
+      amount: formats.smallUsd.format(SMALLEST_USD),
+    });
   }
-  return SMALL_USD.format(usd);
+  return formats.smallUsd.format(usd);
 }
-
-const USD_TICK = new Intl.NumberFormat(LOCALE, {
-  style: "currency",
-  currency: "USD",
-  maximumSignificantDigits: 3,
-});
 
 /**
  * A USD amount on a chart axis, with 3 significant digits: `$0.015`, `$1.25`.
  * Small amounts keep their decimals, so two ticks never show the same text.
  */
-export function formatMoneyTick(usd: number): string {
-  return usd === 0 ? "$0" : USD_TICK.format(usd);
+export function formatMoneyTick(locale: Locale, usd: number): string {
+  return FORMATS[locale].usdTick.format(usd);
 }
 
 /** A share between 0 and 1 as a percentage with at most one decimal: `0.125` → `12.5%`. */
-export function formatRate(fraction: number): string {
-  return PERCENT.format(fraction);
+export function formatRate(locale: Locale, fraction: number): string {
+  return FORMATS[locale].percent.format(fraction);
 }
 
 /**
  * A duration in milliseconds: `850 ms`, `2.1 s`, `1 min 5 s`.
  * `null` (nothing measured) gives `n/a`.
  */
-export function formatDuration(ms: number | null | undefined): string {
+export function formatDuration(
+  locale: Locale,
+  ms: number | null | undefined,
+): string {
+  const t = getTranslator(locale);
   if (ms === null || ms === undefined) {
-    return NO_VALUE;
+    return t("format.noValue");
   }
   if (ms < 1000) {
-    return `${Math.round(ms)} ms`;
+    return t("format.milliseconds", { value: Math.round(ms) });
   }
   if (ms < 60_000) {
-    return `${(ms / 1000).toFixed(1)} s`;
+    const seconds = FORMATS[locale].oneDecimal.format(ms / 1000);
+    return t("format.seconds", { value: seconds });
   }
   const seconds = Math.round(ms / 1000);
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
-  return rest === 0 ? `${minutes} min` : `${minutes} min ${rest} s`;
+  return rest === 0
+    ? t("format.minutes", { value: minutes })
+    : t("format.minutesSeconds", { minutes, seconds: rest });
 }
 
 /** How long ago something happened, from a number of seconds: `5 s ago`, `2 min ago`. */
-export function formatAge(seconds: number): string {
+export function formatAge(locale: Locale, seconds: number): string {
+  const t = getTranslator(locale);
   const whole = Math.max(0, Math.floor(seconds));
-  if (whole < 60) {
-    return `${whole} s ago`;
-  }
-  if (whole < 3600) {
-    return `${Math.floor(whole / 60)} min ago`;
-  }
-  return `${Math.floor(whole / 3600)} h ago`;
+  const duration =
+    whole < 60
+      ? t("format.seconds", { value: whole })
+      : whole < 3600
+        ? t("format.minutes", { value: Math.floor(whole / 60) })
+        : t("format.hours", { value: Math.floor(whole / 3600) });
+  return t("format.ago", { duration });
 }
 
 /**
  * A moment returned by the admin API (ISO 8601, UTC) in a given time zone:
- * `Oct 23, 2026, 14:05`, or `Oct 23, 2026, 14:05:09` with `seconds`.
+ * `Oct 23, 2026, 14:05` (`23 oct. 2026, 14:05`), with the seconds on request.
  */
 export function formatDateTime(
+  locale: Locale,
   iso: string,
   timeZone: string,
   { seconds = false }: { seconds?: boolean } = {},
 ): string {
-  return new Intl.DateTimeFormat(LOCALE, {
+  return new Intl.DateTimeFormat(INTL_LOCALES[locale], {
     timeZone,
     year: "numeric",
     month: "short",
@@ -136,22 +173,24 @@ export function formatDateTime(
  *
  * A 24h period has one point per hour: its hour in the given time zone (`14:00`).
  * Longer periods have one point per UTC day: the day, always read in UTC
- * (`Oct 21`), because the bucket is a UTC day whatever the browser's time zone.
+ * (`Oct 21`, `21 oct.`), because the bucket is a UTC day whatever the browser's
+ * time zone.
  */
 export function formatBucket(
+  locale: Locale,
   iso: string,
   period: Period,
   timeZone: string,
 ): string {
   if (period === "24h") {
-    return new Intl.DateTimeFormat(LOCALE, {
+    return new Intl.DateTimeFormat(INTL_LOCALES[locale], {
       timeZone,
       hour: "2-digit",
       minute: "2-digit",
       hourCycle: "h23",
     }).format(new Date(iso));
   }
-  return new Intl.DateTimeFormat(LOCALE, {
+  return new Intl.DateTimeFormat(INTL_LOCALES[locale], {
     timeZone: "UTC",
     month: "short",
     day: "numeric",
@@ -162,20 +201,25 @@ export function formatBucket(
  * How much of a quota is used: `12 / 30`.
  * No limit gives `no limit`; an unknown use (Redis down) gives `unknown / 30`.
  */
-export function formatQuota(used: number | null, limit: number | null): string {
+export function formatQuota(
+  locale: Locale,
+  used: number | null,
+  limit: number | null,
+): string {
+  const t = getTranslator(locale);
   if (limit === null) {
-    return "no limit";
+    return t("format.noLimit");
   }
-  const shown = used === null ? "unknown" : formatCount(used);
-  return `${shown} / ${formatCount(limit)}`;
+  return t("format.quota", {
+    used: used === null ? t("format.unknown") : formatCount(locale, used),
+    limit: formatCount(locale, limit),
+  });
 }
 
 /** A cosine similarity between 0 and 1, with up to 3 decimals: `0.973`, `1`. */
-export function formatSimilarity(value: number | null): string {
+export function formatSimilarity(locale: Locale, value: number | null): string {
   if (value === null) {
-    return NO_VALUE;
+    return noValue(locale);
   }
-  return new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 3 }).format(
-    value,
-  );
+  return FORMATS[locale].similarity.format(value);
 }

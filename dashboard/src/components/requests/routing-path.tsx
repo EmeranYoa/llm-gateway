@@ -6,6 +6,7 @@ import {
   formatMoney,
   formatSimilarity,
 } from "@/lib/format";
+import type { Locale } from "@/lib/i18n/locale";
 import {
   describeOutcome,
   OUTCOME_KIND_LABELS,
@@ -28,16 +29,16 @@ const KIND_DOTS: Record<OutcomeKind, string> = {
 };
 
 /** Prompt and completion tokens, and the estimate reserved before the call. */
-function formatTokens(step: RoutingStep): string | null {
+function formatTokens(locale: Locale, step: RoutingStep): string | null {
   const parts: string[] = [];
   if (step.prompt_tokens !== null) {
-    parts.push(`${formatCount(step.prompt_tokens)} prompt`);
+    parts.push(`${formatCount(locale, step.prompt_tokens)} prompt`);
   }
   if (step.completion_tokens !== null) {
-    parts.push(`${formatCount(step.completion_tokens)} completion`);
+    parts.push(`${formatCount(locale, step.completion_tokens)} completion`);
   }
   if (step.estimated_tokens !== null) {
-    parts.push(`${formatCount(step.estimated_tokens)} estimated`);
+    parts.push(`${formatCount(locale, step.estimated_tokens)} estimated`);
   }
   return parts.length > 0 ? parts.join(" · ") : null;
 }
@@ -52,29 +53,35 @@ function Detail({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 /** The figures of one step; only those it has, so a skip stays short. */
-function StepDetails({ step }: { step: RoutingStep }) {
+function StepDetails({ step, locale }: { step: RoutingStep; locale: Locale }) {
   const called = step.latency_ms !== null;
-  const tokens = formatTokens(step);
+  const tokens = formatTokens(locale, step);
   return (
     <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-4">
       {step.status_code !== null && (
         <Detail label="HTTP status" value={step.status_code} />
       )}
       {called && (
-        <Detail label="Latency" value={formatDuration(step.latency_ms)} />
+        <Detail
+          label="Latency"
+          value={formatDuration(locale, step.latency_ms)}
+        />
       )}
       {step.first_token_ms !== null && (
         <Detail
           label="First token"
-          value={formatDuration(step.first_token_ms)}
+          value={formatDuration(locale, step.first_token_ms)}
         />
       )}
       {tokens !== null && <Detail label="Tokens" value={tokens} />}
       {called && step.outcome !== "cache_hit" && (
-        <Detail label="Cost" value={formatMoney(step.cost_usd)} />
+        <Detail label="Cost" value={formatMoney(locale, step.cost_usd)} />
       )}
       {step.saved_cost_usd !== null && (
-        <Detail label="Saved cost" value={formatMoney(step.saved_cost_usd)} />
+        <Detail
+          label="Saved cost"
+          value={formatMoney(locale, step.saved_cost_usd)}
+        />
       )}
       {step.cache !== null && <Detail label="Cache" value={step.cache} />}
       {step.cache_similarity !== null && (
@@ -83,7 +90,7 @@ function StepDetails({ step }: { step: RoutingStep }) {
           value={
             step.cache_similarity === 1
               ? "1 (identical request)"
-              : formatSimilarity(step.cache_similarity)
+              : formatSimilarity(locale, step.cache_similarity)
           }
         />
       )}
@@ -108,7 +115,13 @@ function StepTarget({ step }: { step: RoutingStep }) {
  * happened to it. The colour of a step follows its kind (success, error,
  * skipped, client error), always written next to it.
  */
-export function RoutingPath({ steps }: { steps: RoutingStep[] }) {
+export function RoutingPath({
+  steps,
+  locale,
+}: {
+  steps: RoutingStep[];
+  locale: Locale;
+}) {
   return (
     <ol aria-label="Routing path" className="flex flex-col">
       {steps.map((step, position) => {
@@ -148,7 +161,7 @@ export function RoutingPath({ steps }: { steps: RoutingStep[] }) {
                   </Badge>
                 )}
               </div>
-              <StepDetails step={step} />
+              <StepDetails step={step} locale={locale} />
               {step.error_message && (
                 <p className="mt-2 rounded bg-slate-50 px-2 py-1 font-mono text-xs break-words text-slate-700">
                   {step.error_message}

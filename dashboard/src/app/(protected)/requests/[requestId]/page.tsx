@@ -18,8 +18,10 @@ import {
   formatCount,
   formatDuration,
   formatMoney,
-  NO_VALUE,
+  noValue,
 } from "@/lib/format";
+import { getI18n } from "@/lib/i18n/server";
+import type { Locale } from "@/lib/i18n/locale";
 import { parseRequestFilters, requestsHref } from "@/lib/request-filters";
 
 /**
@@ -34,6 +36,7 @@ export default async function RequestDetailPage({
   const { requestId } = await params;
   const { filters, cursor } = parseRequestFilters(await searchParams);
 
+  const { locale } = await getI18n();
   const detail = await getRequest(requestId).catch(keepApiError);
 
   return (
@@ -61,11 +64,11 @@ export default async function RequestDetailPage({
             </p>
           </div>
         ) : (
-          <ApiErrorNotice error={detail} />
+          <ApiErrorNotice error={detail} locale={locale} />
         )
       ) : (
         <>
-          <RequestOverview request={detail} />
+          <RequestOverview request={detail} locale={locale} />
           <section
             aria-labelledby="path-heading"
             className="flex flex-col gap-3"
@@ -76,7 +79,7 @@ export default async function RequestDetailPage({
             <p className="text-sm text-slate-600">
               Every target the gateway examined for this request, in order.
             </p>
-            <RoutingPath steps={detail.routing_path} />
+            <RoutingPath steps={detail.routing_path} locale={locale} />
           </section>
         </>
       )}
@@ -94,7 +97,13 @@ function Item({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 /** The summary of a request: when, who, which alias, and how it ended. */
-function RequestOverview({ request }: { request: RequestDetail }) {
+function RequestOverview({
+  request,
+  locale,
+}: {
+  request: RequestDetail;
+  locale: Locale;
+}) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
       <dl
@@ -105,7 +114,7 @@ function RequestOverview({ request }: { request: RequestDetail }) {
           label="Received"
           value={<LocalDateTime iso={request.created_at} seconds />}
         />
-        <Item label="Tenant" value={request.tenant ?? NO_VALUE} />
+        <Item label="Tenant" value={request.tenant ?? noValue(locale)} />
         <Item
           label="Alias"
           value={<span className="font-mono text-xs">{request.alias}</span>}
@@ -114,17 +123,23 @@ function RequestOverview({ request }: { request: RequestDetail }) {
           label="Status"
           value={<RequestStatusBadge status={request.status} />}
         />
-        <Item label="HTTP status" value={request.status_code ?? NO_VALUE} />
+        <Item
+          label="HTTP status"
+          value={request.status_code ?? noValue(locale)}
+        />
         <Item
           label="Answered by"
           value={
             <AnsweredBy provider={request.provider} model={request.model} />
           }
         />
-        <Item label="Attempts" value={formatCount(request.attempts)} />
+        <Item label="Attempts" value={formatCount(locale, request.attempts)} />
         <Item label="Stream" value={request.stream ? "yes" : "no"} />
-        <Item label="Latency" value={formatDuration(request.latency_ms)} />
-        <Item label="Cost" value={formatMoney(request.cost_usd)} />
+        <Item
+          label="Latency"
+          value={formatDuration(locale, request.latency_ms)}
+        />
+        <Item label="Cost" value={formatMoney(locale, request.cost_usd)} />
         <Item label="Cache" value={cacheLabel(request.cache)} />
       </dl>
       <p className="mt-3 text-xs text-slate-600">
