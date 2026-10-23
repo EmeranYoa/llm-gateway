@@ -18,6 +18,7 @@ import {
   checkLimitsForm,
   checkNewKeyForm,
   checkRevokeForm,
+  type KeyFormError,
 } from "@/lib/key-forms";
 
 /**
@@ -25,8 +26,8 @@ import {
  *
  * Each one checks the form again (the browser is never trusted), calls the admin
  * API through the server-only client, then revalidates the Keys page so it shows
- * the new data. Errors of the admin API come back as a message for the form; a
- * 401 ends the session (the client redirects).
+ * the new data. Errors come back as codes for the form to translate
+ * (`describeKeyError`); a 401 ends the session (the client redirects).
  *
  * The full key returned by `createKeyAction` goes back to the form that asked for
  * it, and nowhere else: it is not written to the session, a cookie or the URL.
@@ -34,7 +35,7 @@ import {
 
 const KEYS_PATH = "/keys";
 
-export type ActionError = { status: "error"; message: string };
+export type ActionError = { status: "error"; error: KeyFormError };
 type Idle = { status: "idle" };
 
 export type CreateKeyState =
@@ -123,7 +124,10 @@ export async function loadActionsAction(
   before: number,
 ): Promise<LoadActionsResult> {
   if (!Number.isSafeInteger(before)) {
-    return { status: "error", message: "No more actions to load." };
+    return {
+      status: "error",
+      error: { kind: "form", problem: "noMoreActions" },
+    };
   }
   try {
     return { status: "loaded", page: await listActions(before) };
@@ -137,7 +141,7 @@ export async function loadActionsAction(
 function invalid(
   checked: Extract<Checked<unknown>, { ok: false }>,
 ): ActionError {
-  return { status: "error", message: checked.error };
+  return { status: "error", error: checked.error };
 }
 
 /**
@@ -156,24 +160,18 @@ async function write<S>(call: () => Promise<S>): Promise<S | ActionError> {
   }
 }
 
-/** Turn an error of the admin API into a message; anything else (redirects, bugs) goes on. */
+/** An error of the admin API, for the form; anything else (redirects, bugs) goes on. */
 function failure(error: unknown): ActionError {
   if (!(error instanceof AdminApiError)) {
     throw error;
   }
-  return { status: "error", message: describe(error) };
-}
-
-function describe(error: AdminApiError): string {
-  switch (error.status) {
-    case null: // unreachable: the message says so
-    case 404: // unknown tenant or key
-    case 409: // key already revoked
-    case 503: // database or Redis unavailable: the message says to try again
-      return error.message;
-    case 400:
-      return `The admin API refused the values. ${error.message}`;
-    default:
-      return `The admin API returned an error (HTTP ${error.status}). ${error.message}`;
-  }
+  return {
+    status: "error",
+    error: {
+      kind: "api",
+      status: error.status,
+      code: error.code,
+      message: error.message,
+    },
+  };
 }

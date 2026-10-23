@@ -1,17 +1,11 @@
 import type { RoutingStep } from "@/api/client";
 import { Badge, type BadgeTone } from "@/components/badge";
-import {
-  formatCount,
-  formatDuration,
-  formatMoney,
-  formatSimilarity,
-} from "@/lib/format";
+import { formatDuration, formatMoney, formatSimilarity } from "@/lib/format";
 import type { Locale } from "@/lib/i18n/locale";
-import {
-  describeOutcome,
-  OUTCOME_KIND_LABELS,
-  type OutcomeKind,
-} from "@/lib/outcomes";
+import { getTranslator } from "@/lib/i18n/translator";
+import { describeOutcome, type OutcomeKind } from "@/lib/outcomes";
+
+import { cacheLabel } from "./request-status-badge";
 
 const KIND_TONES: Record<OutcomeKind, BadgeTone> = {
   success: "green",
@@ -30,15 +24,20 @@ const KIND_DOTS: Record<OutcomeKind, string> = {
 
 /** Prompt and completion tokens, and the estimate reserved before the call. */
 function formatTokens(locale: Locale, step: RoutingStep): string | null {
+  const t = getTranslator(locale);
   const parts: string[] = [];
   if (step.prompt_tokens !== null) {
-    parts.push(`${formatCount(locale, step.prompt_tokens)} prompt`);
+    parts.push(t("routingPath.promptTokens", { tokens: step.prompt_tokens }));
   }
   if (step.completion_tokens !== null) {
-    parts.push(`${formatCount(locale, step.completion_tokens)} completion`);
+    parts.push(
+      t("routingPath.completionTokens", { tokens: step.completion_tokens }),
+    );
   }
   if (step.estimated_tokens !== null) {
-    parts.push(`${formatCount(locale, step.estimated_tokens)} estimated`);
+    parts.push(
+      t("routingPath.estimatedTokens", { tokens: step.estimated_tokens }),
+    );
   }
   return parts.length > 0 ? parts.join(" · ") : null;
 }
@@ -54,42 +53,53 @@ function Detail({ label, value }: { label: string; value: React.ReactNode }) {
 
 /** The figures of one step; only those it has, so a skip stays short. */
 function StepDetails({ step, locale }: { step: RoutingStep; locale: Locale }) {
+  const t = getTranslator(locale);
   const called = step.latency_ms !== null;
   const tokens = formatTokens(locale, step);
   return (
     <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-4">
       {step.status_code !== null && (
-        <Detail label="HTTP status" value={step.status_code} />
+        <Detail label={t("routingPath.httpStatus")} value={step.status_code} />
       )}
       {called && (
         <Detail
-          label="Latency"
+          label={t("routingPath.latency")}
           value={formatDuration(locale, step.latency_ms)}
         />
       )}
       {step.first_token_ms !== null && (
         <Detail
-          label="First token"
+          label={t("routingPath.firstToken")}
           value={formatDuration(locale, step.first_token_ms)}
         />
       )}
-      {tokens !== null && <Detail label="Tokens" value={tokens} />}
+      {tokens !== null && (
+        <Detail label={t("routingPath.tokens")} value={tokens} />
+      )}
       {called && step.outcome !== "cache_hit" && (
-        <Detail label="Cost" value={formatMoney(locale, step.cost_usd)} />
+        <Detail
+          label={t("routingPath.cost")}
+          value={formatMoney(locale, step.cost_usd)}
+        />
       )}
       {step.saved_cost_usd !== null && (
         <Detail
-          label="Saved cost"
+          label={t("routingPath.savedCost")}
           value={formatMoney(locale, step.saved_cost_usd)}
         />
       )}
-      {step.cache !== null && <Detail label="Cache" value={step.cache} />}
+      {step.cache !== null && (
+        <Detail
+          label={t("routingPath.cache")}
+          value={cacheLabel(step.cache, locale)}
+        />
+      )}
       {step.cache_similarity !== null && (
         <Detail
-          label="Similarity"
+          label={t("routingPath.similarity")}
           value={
             step.cache_similarity === 1
-              ? "1 (identical request)"
+              ? t("routingPath.identical")
               : formatSimilarity(locale, step.cache_similarity)
           }
         />
@@ -98,9 +108,13 @@ function StepDetails({ step, locale }: { step: RoutingStep; locale: Locale }) {
   );
 }
 
-function StepTarget({ step }: { step: RoutingStep }) {
+function StepTarget({ step, locale }: { step: RoutingStep; locale: Locale }) {
   if (step.provider === null || step.model === null) {
-    return <span className="text-slate-600">No target examined</span>;
+    return (
+      <span className="text-slate-600">
+        {getTranslator(locale)("routingPath.noTarget")}
+      </span>
+    );
   }
   return (
     <span className="font-mono text-sm break-all">
@@ -122,15 +136,18 @@ export function RoutingPath({
   steps: RoutingStep[];
   locale: Locale;
 }) {
+  const t = getTranslator(locale);
   return (
-    <ol aria-label="Routing path" className="flex flex-col">
+    <ol aria-label={t("routingPath.label")} className="flex flex-col">
       {steps.map((step, position) => {
-        const { kind, label } = describeOutcome(step);
+        const { kind, label } = describeOutcome(step, locale);
         const last = position === steps.length - 1;
         return (
           <li
             key={step.attempt_index}
-            aria-label={`Step ${step.attempt_index + 1}`}
+            aria-label={t("routingPath.step", {
+              number: step.attempt_index + 1,
+            })}
             className="relative flex gap-3 pb-4"
           >
             {!last && (
@@ -147,17 +164,17 @@ export function RoutingPath({
             </span>
             <div className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
               <div className="flex flex-wrap items-center gap-2">
-                <StepTarget step={step} />
+                <StepTarget step={step} locale={locale} />
                 <Badge tone={KIND_TONES[kind]}>
-                  {OUTCOME_KIND_LABELS[kind]}
+                  {t(`outcomes.kinds.${kind}`)}
                 </Badge>
                 <span className="text-sm text-slate-700">{label}</span>
                 {step.degraded && (
                   <Badge
                     tone="orange"
-                    title="The gateway routed without Redis: no quota, cooldown or breaker checks."
+                    title={t("routingPath.degradedDefinition")}
                   >
-                    Degraded mode
+                    {t("routingPath.degraded")}
                   </Badge>
                 )}
               </div>

@@ -22,7 +22,7 @@ export default async function OverviewPage({ searchParams }: PageProps<"/">) {
   const period = parsePeriod(params.period);
   const tenant = parseTenant(params.tenant);
 
-  const { locale } = await getI18n();
+  const { locale, t } = await getI18n();
   const [report, tenantNames] = await Promise.all([
     getOverview(period, tenant).catch(keepApiError),
     loadTenantNames(),
@@ -33,7 +33,9 @@ export default async function OverviewPage({ searchParams }: PageProps<"/">) {
     <section className="flex flex-col gap-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <h1 className="text-xl font-semibold">
-          Overview{tenant !== null && `: ${tenant}`}
+          {tenant === null
+            ? t("overview.title")
+            : t("overview.titleForTenant", { tenant })}
         </h1>
         <div className="flex flex-wrap gap-4">
           <PeriodFilter value={period} />

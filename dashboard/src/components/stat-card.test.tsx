@@ -13,6 +13,7 @@ describe("StatCard", () => {
         label="Error rate"
         value="2.5%"
         definition="failed / requests."
+        locale="en"
       />,
     );
 
@@ -35,6 +36,7 @@ describe("StatCard", () => {
         definition="Cost of every attempt that has a price."
         detail="Saved by the cache: $0.40"
         warning="3 requests without a price"
+        locale="en"
       />,
     );
 

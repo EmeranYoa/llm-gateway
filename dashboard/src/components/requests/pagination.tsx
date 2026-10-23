@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import type { Locale } from "@/lib/i18n/locale";
+import { getTranslator } from "@/lib/i18n/translator";
 import { type RequestFilters, requestsHref } from "@/lib/request-filters";
 
 type RequestsPaginationProps = {
@@ -8,6 +10,7 @@ type RequestsPaginationProps = {
   cursor: string | null;
   /** `next_cursor` of the page shown: null on the last page. */
   nextCursor: string | null;
+  locale: Locale;
 };
 
 const LINK =
@@ -21,20 +24,22 @@ export function RequestsPagination({
   filters,
   cursor,
   nextCursor,
+  locale,
 }: RequestsPaginationProps) {
   if (cursor === null && nextCursor === null) {
     return null;
   }
+  const t = getTranslator(locale);
   return (
-    <nav aria-label="Pages of requests" className="flex flex-wrap gap-3">
+    <nav aria-label={t("requests.pages")} className="flex flex-wrap gap-3">
       {cursor !== null && (
         <Link href={requestsHref(filters)} className={LINK}>
-          Newest requests
+          {t("requests.newest")}
         </Link>
       )}
       {nextCursor !== null && (
         <Link href={requestsHref(filters, nextCursor)} className={LINK}>
-          Older requests
+          {t("requests.older")}
         </Link>
       )}
     </nav>

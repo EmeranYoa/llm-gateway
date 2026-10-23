@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { useTranslator } from "@/lib/i18n/client";
 import type { CreateKeyState } from "@/lib/key-actions";
 import { checkNewKeyForm } from "@/lib/key-forms";
 
@@ -26,6 +27,7 @@ export function CreateKeyForm({
   tenants,
   defaultTenant,
 }: CreateKeyFormProps) {
+  const t = useTranslator();
   const { state, onSubmit, pending } = useCheckedAction<CreateKeyState>(
     action,
     IDLE,
@@ -48,7 +50,7 @@ export function CreateKeyForm({
       >
         <div className="flex flex-col gap-1">
           <label htmlFor="new-key-tenant" className="text-sm font-medium">
-            Tenant
+            {t("keys.fields.tenant")}
           </label>
           <input
             id="new-key-tenant"
@@ -67,7 +69,7 @@ export function CreateKeyForm({
         </div>
         <div className="flex flex-col gap-1">
           <label htmlFor="new-key-rpm" className="text-sm font-medium">
-            Requests per minute (optional)
+            {t("keys.fields.rpmOptional")}
           </label>
           <input
             id="new-key-rpm"
@@ -81,7 +83,7 @@ export function CreateKeyForm({
         </div>
         <div className="flex flex-col gap-1">
           <label htmlFor="new-key-tokens" className="text-sm font-medium">
-            Tokens per day (optional)
+            {t("keys.fields.tokensOptional")}
           </label>
           <input
             id="new-key-tokens"
@@ -94,14 +96,11 @@ export function CreateKeyForm({
           />
         </div>
         <button type="submit" disabled={pending} className={primaryButtonClass}>
-          Create key
+          {t("keys.create.submit")}
         </button>
       </form>
-      <p className="text-xs text-slate-600">
-        A new tenant is created with its first key. Limits given become the
-        tenant&apos;s own limits; limits left empty keep their value.
-      </p>
-      {state.status === "error" && <ErrorMessage message={state.message} />}
+      <p className="text-xs text-slate-600">{t("keys.create.hint")}</p>
+      {state.status === "error" && <ErrorMessage error={state.error} />}
       {createdKey && (
         <NewKeyNotice
           key={createdKey.id}

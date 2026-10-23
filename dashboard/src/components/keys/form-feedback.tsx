@@ -1,12 +1,19 @@
 /** Feedback of the forms of the Keys screen, announced by screen readers. */
 
-export function ErrorMessage({ message }: { message: string }) {
+import { useLocale } from "@/lib/i18n/client";
+import { describeKeyError } from "@/lib/i18n/key-errors";
+import type { KeyFormError } from "@/lib/key-forms";
+
+/** The error of a form, in the language of the page (for client components). */
+export function ErrorMessage({ error }: { error: KeyFormError }) {
+  const { message, detail } = describeKeyError(error, useLocale());
   return (
     <p
       role="alert"
       className="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
     >
       {message}
+      {detail !== null && <span className="block text-xs">{detail}</span>}
     </p>
   );
 }

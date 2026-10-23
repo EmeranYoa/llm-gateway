@@ -34,7 +34,7 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
   const { tenant } = await searchParams;
   const selected = typeof tenant === "string" && tenant !== "" ? tenant : null;
 
-  const { locale } = await getI18n();
+  const { locale, t } = await getI18n();
   const [names, actions, tenantKeys] = await Promise.all([
     load(listTenantNames),
     load(() => listActions()),
@@ -45,11 +45,8 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <h1 className="mb-1 text-xl font-semibold">Keys</h1>
-        <p className="text-sm text-slate-600">
-          Manage the API keys and limits of tenants. Gateways see changes within
-          60 seconds.
-        </p>
+        <h1 className="mb-1 text-xl font-semibold">{t("keys.title")}</h1>
+        <p className="text-sm text-slate-600">{t("keys.intro")}</p>
         <p className="text-xs text-slate-600">
           <TimeZoneName />
         </p>
@@ -60,7 +57,7 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
         className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4"
       >
         <h2 id="create-heading" className="text-lg font-semibold">
-          Create a key
+          {t("keys.createHeading")}
         </h2>
         <CreateKeyForm
           action={createKeyAction}
@@ -72,23 +69,25 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
       <div className="grid gap-6 md:grid-cols-[14rem_1fr]">
         <nav aria-labelledby="tenants-heading">
           <h2 id="tenants-heading" className="mb-2 text-lg font-semibold">
-            Tenants
+            {t("keys.tenantsHeading")}
           </h2>
           {"error" in names ? (
             <ApiErrorNotice error={names.error} locale={locale} />
           ) : (
-            <TenantList names={names.data} selected={selected} />
+            <TenantList
+              names={names.data}
+              selected={selected}
+              locale={locale}
+            />
           )}
         </nav>
         <div className="rounded-lg border border-slate-200 bg-white p-4">
           {tenantKeys === null ? (
-            <p className="text-sm text-slate-600">
-              Select a tenant to see its limits and keys.
-            </p>
+            <p className="text-sm text-slate-600">{t("keys.selectTenant")}</p>
           ) : "error" in tenantKeys ? (
             <ApiErrorNotice error={tenantKeys.error} locale={locale} />
           ) : (
-            <TenantKeysPanel data={tenantKeys.data} />
+            <TenantKeysPanel data={tenantKeys.data} locale={locale} />
           )}
         </div>
       </div>
@@ -98,7 +97,7 @@ export default async function KeysPage({ searchParams }: PageProps<"/keys">) {
         className="flex flex-col gap-3"
       >
         <h2 id="history-heading" className="text-lg font-semibold">
-          History of admin actions
+          {t("keys.historyHeading")}
         </h2>
         {"error" in actions ? (
           <ApiErrorNotice error={actions.error} locale={locale} />

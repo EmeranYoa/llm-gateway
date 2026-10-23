@@ -119,11 +119,14 @@ describe("createKeyAction", () => {
       createKeyAction(IDLE, formOf({ tenant: "  " })),
     ).resolves.toEqual({
       status: "error",
-      message: "Enter the name of a tenant.",
+      error: { kind: "form", problem: "missingTenantName" },
     });
     await expect(
       createKeyAction(IDLE, formOf({ tenant: "acme", rpm: "-3" })),
-    ).resolves.toMatchObject({ status: "error" });
+    ).resolves.toEqual({
+      status: "error",
+      error: { kind: "form", problem: "notWholeNumber", field: "rpm" },
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -142,8 +145,13 @@ describe("createKeyAction", () => {
 
     expect(state).toEqual({
       status: "error",
-      message:
-        "The admin API refused the values. Invalid value for 'rpm': Input should be less than or equal to 2147483647",
+      error: {
+        kind: "api",
+        status: 400,
+        code: null,
+        message:
+          "Invalid value for 'rpm': Input should be less than or equal to 2147483647",
+      },
     });
   });
 
@@ -195,13 +203,16 @@ describe("revokeKeyAction", () => {
     [404, "No API key with id 7.", "key_not_found"],
     [409, "API key 7 is already revoked.", "key_already_revoked"],
   ])(
-    "shows the message of a %i and refreshes the page",
+    "returns the error of a %i and refreshes the page",
     async (status, message, code) => {
       stubAdminApi(apiError(status, message, code));
 
       const state = await revokeKeyAction(IDLE, formOf({ keyId: "7" }));
 
-      expect(state).toEqual({ status: "error", message });
+      expect(state).toEqual({
+        status: "error",
+        error: { kind: "api", status, code, message },
+      });
       expect(revalidatePath).toHaveBeenCalledWith("/keys");
     },
   );
@@ -211,7 +222,10 @@ describe("revokeKeyAction", () => {
 
     const state = await revokeKeyAction(IDLE, formOf({ keyId: "abc" }));
 
-    expect(state).toMatchObject({ status: "error" });
+    expect(state).toEqual({
+      status: "error",
+      error: { kind: "form", problem: "missingKeyId" },
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -249,8 +263,7 @@ describe("setLimitsAction", () => {
 
     expect(state).toEqual({
       status: "error",
-      message:
-        "Give at least one limit: requests per minute or tokens per day.",
+      error: { kind: "form", problem: "noLimitGiven" },
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -265,7 +278,12 @@ describe("setLimitsAction", () => {
 
     expect(state).toEqual({
       status: "error",
-      message: "Unknown tenant 'ghost'.",
+      error: {
+        kind: "api",
+        status: 404,
+        code: "tenant_not_found",
+        message: "Unknown tenant 'ghost'.",
+      },
     });
   });
 });
@@ -319,7 +337,12 @@ describe("clearCacheAction", () => {
 
     expect(state).toEqual({
       status: "error",
-      message: "Redis is unavailable. Try again later.",
+      error: {
+        kind: "api",
+        status: 503,
+        code: "redis_unavailable",
+        message: "Redis is unavailable. Try again later.",
+      },
     });
   });
 
@@ -333,9 +356,9 @@ describe("clearCacheAction", () => {
 
     const state = await clearCacheAction(IDLE, formOf({ tenant: "acme" }));
 
-    expect(state).toEqual({
+    expect(state).toMatchObject({
       status: "error",
-      message: "The admin API cannot be reached. Check that it is running.",
+      error: { kind: "api", status: null, code: "admin_api_unreachable" },
     });
   });
 });
@@ -364,7 +387,22 @@ describe("loadActionsAction", () => {
 
     await expect(loadActionsAction(42)).resolves.toEqual({
       status: "error",
-      message: "The database is unavailable. Try again later.",
+      error: {
+        kind: "api",
+        status: 503,
+        code: null,
+        message: "The database is unavailable. Try again later.",
+      },
     });
+  });
+
+  it("refuses a cursor that is not a whole number", async () => {
+    const fetchMock = stubAdminApi(jsonResponse(200, {}));
+
+    await expect(loadActionsAction(1.5)).resolves.toEqual({
+      status: "error",
+      error: { kind: "form", problem: "noMoreActions" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -2,7 +2,8 @@
 
 import { useBrowserTimeZone } from "@/lib/browser-hooks";
 import { formatDateTime } from "@/lib/format";
-import { useLocale } from "@/lib/i18n/client";
+import { useLocale, useTranslator } from "@/lib/i18n/client";
+import { richText } from "@/lib/i18n/rich-text";
 
 /**
  * Times of the admin API (UTC) shown in the browser's time zone. On the server
@@ -31,15 +32,20 @@ export function LocalDateTime({
 
 /** Names the time zone the screen uses: "Times in Africa/Douala". */
 export function TimeZoneName() {
-  return <span>Times in {useBrowserTimeZone()}</span>;
+  const t = useTranslator();
+  return <span>{t("time.zone", { timeZone: useBrowserTimeZone() })}</span>;
 }
 
 /** The time range of a report, and the time zone it is shown in. */
 export function PeriodRange({ start, end }: { start: string; end: string }) {
+  const t = useTranslator();
   return (
     <p className="text-xs text-slate-600">
-      From <LocalDateTime iso={start} /> to <LocalDateTime iso={end} /> ·{" "}
-      <TimeZoneName />
+      {richText(t, "time.range", {
+        start: <LocalDateTime iso={start} />,
+        end: <LocalDateTime iso={end} />,
+      })}{" "}
+      · <TimeZoneName />
     </p>
   );
 }

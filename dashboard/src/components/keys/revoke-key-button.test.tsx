@@ -77,10 +77,15 @@ describe("RevokeKeyButton", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
-  it("shows the error returned by the action", async () => {
+  it("shows the error returned by the action, translated from its code", async () => {
     const action = fakeAction({
       status: "error",
-      message: "API key 7 is already revoked.",
+      error: {
+        kind: "api",
+        status: 409,
+        code: "key_already_revoked",
+        message: "API key 7 is already revoked.",
+      },
     });
     render(<RevokeKeyButton action={action} keyId={7} prefix="gw_abcdef" />);
 
@@ -88,7 +93,7 @@ describe("RevokeKeyButton", () => {
     fireEvent.click(screen.getByRole("button", { name: "Revoke key" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "API key 7 is already revoked.",
+      "This API key is already revoked.",
     );
   });
 });

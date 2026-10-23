@@ -1,5 +1,4 @@
 import type { Overview } from "@/api/client";
-import { DEFINITIONS } from "@/lib/definitions";
 import {
   formatCount,
   formatDuration,
@@ -7,12 +6,9 @@ import {
   formatRate,
 } from "@/lib/format";
 import type { Locale } from "@/lib/i18n/locale";
+import { getTranslator } from "@/lib/i18n/translator";
 
 import { StatCard } from "./stat-card";
-
-function plural(locale: Locale, count: number, word: string): string {
-  return `${formatCount(locale, count)} ${word}${count === 1 ? "" : "s"}`;
-}
 
 function FigureGroup({
   title,
@@ -41,6 +37,7 @@ export function OverviewFigures({
   overview: Overview;
   locale: Locale;
 }) {
+  const t = getTranslator(locale);
   const {
     latency_ms: latency,
     time_to_first_token_ms: firstToken,
@@ -49,80 +46,106 @@ export function OverviewFigures({
 
   return (
     <div className="flex flex-col gap-6">
-      <FigureGroup title="Traffic">
+      <FigureGroup title={t("overview.groups.traffic")}>
         <StatCard
-          label="Requests"
+          locale={locale}
+          label={t("overview.requests")}
           value={formatCount(locale, overview.requests)}
-          definition={DEFINITIONS.requests}
-          detail={`${formatCount(locale, overview.answered)} answered`}
+          definition={t("definitions.requests")}
+          detail={t("overview.answered", { count: overview.answered })}
         />
         <StatCard
-          label="Error rate"
+          locale={locale}
+          label={t("overview.errorRate")}
           value={formatRate(locale, overview.error_rate)}
-          definition={DEFINITIONS.errorRate}
-          detail={`${formatCount(locale, overview.failed)} failed. Not counted: ${plural(locale, overview.client_error, "client error")}, ${formatCount(locale, overview.cancelled)} cancelled.`}
+          definition={t("definitions.errorRate")}
+          detail={t("overview.errorDetail", {
+            failed: t("overview.failed", { count: overview.failed }),
+            clientErrors: t("overview.clientErrors", {
+              count: overview.client_error,
+            }),
+            cancelled: t("overview.cancelled", { count: overview.cancelled }),
+          })}
         />
         <StatCard
-          label="Fallback rate"
+          locale={locale}
+          label={t("overview.fallbackRate")}
           value={formatRate(locale, overview.fallback_rate)}
-          definition={DEFINITIONS.fallbackRate}
+          definition={t("definitions.fallbackRate")}
         />
       </FigureGroup>
 
-      <FigureGroup title="Speed">
+      <FigureGroup title={t("overview.groups.speed")}>
         <StatCard
-          label="Latency p50"
+          locale={locale}
+          label={t("overview.latency")}
           value={formatDuration(locale, latency.p50)}
-          definition={DEFINITIONS.latency}
-          detail={`p95: ${formatDuration(locale, latency.p95)}`}
+          definition={t("definitions.latency")}
+          detail={t("overview.p95", {
+            value: formatDuration(locale, latency.p95),
+          })}
         />
         <StatCard
-          label="Time to first token p50"
+          locale={locale}
+          label={t("overview.timeToFirstToken")}
           value={formatDuration(locale, firstToken.p50)}
-          definition={DEFINITIONS.timeToFirstToken}
-          detail={`p95: ${formatDuration(locale, firstToken.p95)} · streams only`}
+          definition={t("definitions.timeToFirstToken")}
+          detail={t("overview.timeToFirstTokenDetail", {
+            value: formatDuration(locale, firstToken.p95),
+          })}
         />
         <StatCard
-          label="Cache hit latency p50"
+          locale={locale}
+          label={t("overview.cacheHitLatency")}
           value={formatDuration(locale, overview.cache_hit_latency_ms.p50)}
-          definition={DEFINITIONS.cacheHitLatency}
+          definition={t("definitions.cacheHitLatency")}
         />
       </FigureGroup>
 
-      <FigureGroup title="Tokens and cost">
+      <FigureGroup title={t("overview.groups.cost")}>
         <StatCard
-          label="Tokens"
+          locale={locale}
+          label={t("overview.tokens")}
           value={formatCount(locale, overview.tokens)}
-          definition={DEFINITIONS.tokens}
+          definition={t("definitions.tokens")}
         />
         <StatCard
-          label="Cost"
+          locale={locale}
+          label={t("overview.cost")}
           value={formatMoney(locale, overview.cost_usd)}
-          definition={DEFINITIONS.cost}
+          definition={t("definitions.cost")}
           warning={
             unpriced > 0
-              ? `${plural(locale, unpriced, "request")} without a price, not included`
+              ? t("overview.unpriced", { count: unpriced })
               : undefined
           }
         />
       </FigureGroup>
 
-      <FigureGroup title="Cache">
+      <FigureGroup title={t("overview.groups.cache")}>
         <StatCard
-          label="Cache hit rate"
+          locale={locale}
+          label={t("overview.cacheHitRate")}
           value={formatRate(locale, overview.cache_hit_rate)}
-          definition={DEFINITIONS.cacheHitRate}
-          detail={`${plural(locale, overview.cache_hits, "hit")} of ${plural(locale, overview.cache_requests, "cached request")}`}
+          definition={t("definitions.cacheHitRate")}
+          detail={t("overview.cacheHitDetail", {
+            hits: t("overview.hits", { count: overview.cache_hits }),
+            requests: t("overview.cachedRequests", {
+              count: overview.cache_requests,
+            }),
+          })}
         />
         <StatCard
-          label="Saved tokens"
+          locale={locale}
+          label={t("overview.savedTokens")}
           value={formatCount(locale, overview.saved_tokens)}
-          definition={DEFINITIONS.savedTokens}
+          definition={t("definitions.savedTokens")}
         />
         <StatCard
-          label="Saved cost"
+          locale={locale}
+          label={t("overview.savedCost")}
           value={formatMoney(locale, overview.saved_cost_usd)}
-          definition={DEFINITIONS.savedCost}
+          definition={t("definitions.savedCost")}
         />
       </FigureGroup>
     </div>

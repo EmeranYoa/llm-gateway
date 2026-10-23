@@ -110,9 +110,41 @@ The dashboard speaks English and French. There is no i18n library:
   keeps it after sign-out; signed out, it only writes the cookie.
 - Errors of the admin API are translated from their `code`
   (`lib/i18n/api-errors.ts`); an unknown code shows a generic message and the
-  English detail of the admin API.
+  English detail of the admin API. The admin API does not list its codes in
+  `openapi.json`, so `lib/i18n/api-error-codes.ts` keeps the list (with the
+  `grep` that finds them in `app/admin_api`). A test fails when a code has no
+  message in a language, and, in a clone of the repository, when the list and
+  the Python sources differ.
+- Forms and server actions return error codes, never texts (for example
+  `{ kind: "form", problem: "noLimitGiven" }`); the component translates them
+  in the operator's language (`describeAuthError`, `describeKeyError`).
+- A sentence that holds an element (a `<time>`, a `<code>`) is one message with a
+  placeholder, filled with `richText(t, key, { time: <LocalDateTime ... /> })`
+  (`lib/i18n/rich-text.tsx`), so each language puts the element where it needs.
+- Values of the gateway keep their raw form when the dashboard does not know
+  them: an outcome, an admin action, a cache result or a detail added later is
+  shown as it is, never as an empty text.
 - French texts follow French typography: a no-break space (written `\u00a0`) before
-  `:`, `?`, `!`, `%` and units.
+  `:`, `?`, `!`, `%` and units. A test checks it.
+- French vocabulary, used the same way on every screen:
+
+  | English                 | French                                   |
+  | ----------------------- | ---------------------------------------- |
+  | tenant                  | tenant (product term, masculine)         |
+  | provider                | fournisseur                              |
+  | target                  | cible                                    |
+  | request                 | requête                                  |
+  | answered                | servie                                   |
+  | key                     | clé                                      |
+  | token (LLM)             | token                                    |
+  | token (setup, recovery) | jeton                                    |
+  | fallback                | repli                                    |
+  | cooldown                | pause                                    |
+  | circuit breaker         | disjoncteur (ouvert, semi-ouvert, fermé) |
+  | skipped                 | ignorée                                  |
+  | cache hit               | réponse du cache                         |
+  | streaming               | streaming                                |
+  | degraded mode           | mode dégradé                             |
 
 ## Environment variables
 

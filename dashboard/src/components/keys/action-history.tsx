@@ -3,10 +3,15 @@
 import { useState, useTransition } from "react";
 
 import type { AdminAction, AdminActionPage } from "@/api/tenant-keys";
+import { LocalDateTime } from "@/components/local-time";
+import { useLocale } from "@/lib/i18n/client";
+import type { Locale } from "@/lib/i18n/locale";
+import { getTranslator } from "@/lib/i18n/translator";
 import type { LoadActionsResult } from "@/lib/key-actions";
+import type { KeyFormError } from "@/lib/key-forms";
+import { en } from "@/messages/en";
 
 import { ErrorMessage, secondaryButtonClass } from "./form-feedback";
-import { LocalDateTime } from "@/components/local-time";
 
 type ActionHistoryProps = {
   /** The newest actions, loaded with the page. */
@@ -15,35 +20,51 @@ type ActionHistoryProps = {
   loadMore: (before: number) => Promise<LoadActionsResult>;
 };
 
-const DETAIL_LABELS: Record<string, string> = {
-  key_id: "key id",
-  tokens_per_day: "tokens per day",
-};
+type DetailName = keyof typeof en.keys.history.detailNames;
+
+/** The name of a detail in the language of the page; an unknown one is shown with spaces. */
+function detailName(locale: Locale, name: string): string {
+  if (!Object.hasOwn(en.keys.history.detailNames, name)) {
+    return name.replaceAll("_", " ");
+  }
+  return getTranslator(locale)(
+    `keys.history.detailNames.${name as DetailName}`,
+  );
+}
 
 /** One line from the details of an action, e.g. "prefix gw_abc, rpm 30". */
-export function summarizeDetails(action: AdminAction): string {
+export function summarizeDetails(action: AdminAction, locale: Locale): string {
+  const t = getTranslator(locale);
   const parts = Object.entries(action.details).map(([name, value]) => {
-    const label = DETAIL_LABELS[name] ?? name.replaceAll("_", " ");
     if (value === null && name === "alias") {
-      return "every alias";
+      return t("keys.history.everyAlias");
     }
     const text =
       typeof value === "object" && value !== null
         ? JSON.stringify(value)
         : String(value);
-    return `${label} ${text}`;
+    return `${detailName(locale, name)} ${text}`;
   });
   return parts.length === 0 ? "-" : parts.join(", ");
 }
 
 /** What the action changed: a tenant name, a key id, or every tenant. */
-function describeTarget(action: AdminAction): string {
+function describeTarget(action: AdminAction, locale: Locale): string {
+  const t = getTranslator(locale);
   if (action.target === null) {
-    return "every tenant";
+    return t("keys.history.everyTenant");
   }
   return KEY_ID_TARGETS.has(action.action)
-    ? `key ${action.target}`
+    ? t("keys.history.key", { id: action.target })
     : action.target;
+}
+
+/** The action in the language of the page; one added after this dashboard keeps its id. */
+function actionName(action: AdminAction, locale: Locale): string {
+  if (!Object.hasOwn(en.keys.history.actions, action.action)) {
+    return action.action;
+  }
+  return getTranslator(locale)(`keys.history.actions.${action.action}`);
 }
 
 /** Actions whose target is the id of a key; the others target a tenant. */
@@ -55,9 +76,11 @@ const KEY_ID_TARGETS = new Set<AdminAction["action"]>([
 
 /** History of admin actions, newest first, with older pages loaded on demand. */
 export function ActionHistory({ firstPage, loadMore }: ActionHistoryProps) {
+  const locale = useLocale();
+  const t = getTranslator(locale);
   const [actions, setActions] = useState(firstPage.actions);
   const [nextBefore, setNextBefore] = useState(firstPage.next_before);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<KeyFormError | null>(null);
   const [pending, startTransition] = useTransition();
 
   function loadOlder() {
@@ -67,7 +90,7 @@ export function ActionHistory({ firstPage, loadMore }: ActionHistoryProps) {
     startTransition(async () => {
       const result = await loadMore(nextBefore);
       if (result.status === "error") {
-        setError(result.message);
+        setError(result.error);
         return;
       }
       setError(null);
@@ -77,7 +100,7 @@ export function ActionHistory({ firstPage, loadMore }: ActionHistoryProps) {
   }
 
   if (actions.length === 0) {
-    return <p className="text-sm text-slate-600">No admin action yet.</p>;
+    return <p className="text-sm text-slate-600">{t("keys.history.empty")}</p>;
   }
 
   return (
@@ -87,19 +110,19 @@ export function ActionHistory({ firstPage, loadMore }: ActionHistoryProps) {
           <thead className="bg-slate-50 text-xs text-slate-600 uppercase">
             <tr>
               <th scope="col" className="px-3 py-2">
-                Time
+                {t("keys.history.time")}
               </th>
               <th scope="col" className="px-3 py-2">
-                Actor
+                {t("keys.history.actor")}
               </th>
               <th scope="col" className="px-3 py-2">
-                Action
+                {t("keys.history.action")}
               </th>
               <th scope="col" className="px-3 py-2">
-                Target
+                {t("keys.history.target")}
               </th>
               <th scope="col" className="px-3 py-2">
-                Details
+                {t("keys.history.details")}
               </th>
             </tr>
           </thead>
@@ -110,17 +133,19 @@ export function ActionHistory({ firstPage, loadMore }: ActionHistoryProps) {
                   <LocalDateTime iso={action.created_at} />
                 </td>
                 <td className="px-3 py-2">{action.actor}</td>
-                <td className="px-3 py-2 font-mono text-xs">{action.action}</td>
-                <td className="px-3 py-2">{describeTarget(action)}</td>
+                <td className="px-3 py-2" title={action.action}>
+                  {actionName(action, locale)}
+                </td>
+                <td className="px-3 py-2">{describeTarget(action, locale)}</td>
                 <td className="px-3 py-2 text-slate-600">
-                  {summarizeDetails(action)}
+                  {summarizeDetails(action, locale)}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {error && <ErrorMessage message={error} />}
+      {error && <ErrorMessage error={error} />}
       {nextBefore !== null && (
         <div>
           <button
@@ -129,7 +154,7 @@ export function ActionHistory({ firstPage, loadMore }: ActionHistoryProps) {
             disabled={pending}
             className={secondaryButtonClass}
           >
-            {pending ? "Loading..." : "Load more"}
+            {pending ? t("keys.history.loading") : t("keys.history.loadMore")}
           </button>
         </div>
       )}

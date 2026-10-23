@@ -74,9 +74,18 @@ describe("dictionaries", () => {
     }
   });
 
-  it("never translate a message with an empty text", () => {
-    for (const [key, text] of flatten(fr as unknown as Tree)) {
+  it.each([
+    ["English", en],
+    ["French", fr],
+  ])("never have an empty message in %s", (_, messages) => {
+    for (const [key, text] of flatten(messages as unknown as Tree)) {
       expect(text.trim(), key).not.toBe("");
+    }
+  });
+
+  it("follow French typography: a no-break space before : ? ! %", () => {
+    for (const [key, text] of flatten(fr as unknown as Tree)) {
+      expect(text, key).not.toMatch(/ [:?!%]/);
     }
   });
 });

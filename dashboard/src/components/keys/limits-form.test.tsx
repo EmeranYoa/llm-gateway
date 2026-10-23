@@ -99,8 +99,13 @@ describe("LimitsForm", () => {
   it("shows the validation error of the admin API", async () => {
     const action = fakeAction({
       status: "error",
-      message:
-        "The admin API refused the values. Invalid value for 'rpm': Input should be less than or equal to 2147483647",
+      error: {
+        kind: "api",
+        status: 400,
+        code: null,
+        message:
+          "Invalid value for 'rpm': Input should be less than or equal to 2147483647",
+      },
     });
     renderForm(action);
 

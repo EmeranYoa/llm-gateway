@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { usePageHidden } from "@/lib/browser-hooks";
 import { formatAge } from "@/lib/format";
 import { useLocale } from "@/lib/i18n/client";
+import { getTranslator } from "@/lib/i18n/translator";
 
 /** How often the data of a screen is reloaded. */
 export const REFRESH_INTERVAL_MS = 10_000;
@@ -57,6 +58,7 @@ export function AutoRefresh({
   const router = useRouter();
   const hidden = usePageHidden();
   const locale = useLocale();
+  const t = getTranslator(locale);
   const [paused, setPaused] = useState(false);
   const [now, setNow] = useState<number | null>(null);
   const [lastGood, setLastGood] = useState<Snapshot | null>(null);
@@ -93,28 +95,32 @@ export function AutoRefresh({
       <div className="mb-4 flex flex-wrap items-center gap-3 text-xs text-slate-600">
         {shownUpdatedAt !== null && (
           <span>
-            Updated {formatAge(locale, ageInSeconds(shownUpdatedAt, now))}
+            {t("autoRefresh.updated", {
+              age: formatAge(locale, ageInSeconds(shownUpdatedAt, now)),
+            })}
           </span>
         )}
         {paused ? (
-          <span>Auto-refresh paused</span>
+          <span>{t("autoRefresh.paused")}</span>
         ) : (
-          hidden && <span>Auto-refresh paused while the tab is hidden</span>
+          hidden && <span>{t("autoRefresh.pausedHidden")}</span>
         )}
         <span role="status">
           {stale && (
             <span className="rounded bg-amber-100 px-2 py-0.5 font-medium text-amber-900">
-              Update failed
+              {t("autoRefresh.failed")}
             </span>
           )}
         </span>
         <button
           type="button"
           onClick={() => setPaused(!paused)}
-          aria-label={paused ? "Resume auto-refresh" : "Pause auto-refresh"}
+          aria-label={
+            paused ? t("autoRefresh.resumeLabel") : t("autoRefresh.pauseLabel")
+          }
           className="rounded border border-slate-300 bg-white px-2 py-0.5 text-slate-700 hover:bg-slate-100 focus:ring-2 focus:ring-sky-600 focus:outline-none"
         >
-          {paused ? "Resume" : "Pause"}
+          {paused ? t("autoRefresh.resume") : t("autoRefresh.pause")}
         </button>
       </div>
       {content}

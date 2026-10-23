@@ -29,7 +29,10 @@ export type MessageKey<T> = {
 }[keyof T & string];
 
 /** The message of `T` at the dotted path `K`. */
-type MessageAt<T, K extends string> = K extends `${infer Head}.${infer Rest}`
+export type MessageAt<
+  T,
+  K extends string,
+> = K extends `${infer Head}.${infer Rest}`
   ? Head extends keyof T
     ? MessageAt<T[Head], Rest>
     : never
@@ -38,7 +41,7 @@ type MessageAt<T, K extends string> = K extends `${infer Head}.${infer Rest}`
     : never;
 
 /** The names of the `{placeholders}` of a text: `"{used} / {limit}"` gives `"used" | "limit"`. */
-type Placeholders<S> = S extends `${string}{${infer Name}}${infer Rest}`
+export type Placeholders<S> = S extends `${string}{${infer Name}}${infer Rest}`
   ? Name | Placeholders<Rest>
   : never;
 

@@ -10,15 +10,12 @@ import { PeriodFilter } from "@/components/filters";
 import { TimeZoneName } from "@/components/local-time";
 import { HEALTH_TONES, TargetCard } from "@/components/providers/target-card";
 import { Badge } from "@/components/badge";
-import { formatCount } from "@/lib/format";
 import { getI18n } from "@/lib/i18n/server";
 import type { Locale } from "@/lib/i18n/locale";
+import { richText } from "@/lib/i18n/rich-text";
+import { getTranslator } from "@/lib/i18n/translator";
 import { type Period, parsePeriod } from "@/lib/period";
-import {
-  TARGET_HEALTH_LABELS,
-  type TargetHealth,
-  targetHealth,
-} from "@/lib/target-health";
+import { type TargetHealth, targetHealth } from "@/lib/target-health";
 
 /**
  * Providers & models: one card per target (provider/model), with its
@@ -31,14 +28,14 @@ export default async function ProvidersPage({
 }: PageProps<"/providers">) {
   const period = parsePeriod((await searchParams).period);
 
-  const { locale } = await getI18n();
+  const { locale, t } = await getI18n();
   const loaded = await loadTargets(period).catch(keepApiError);
   const report = loaded instanceof AdminApiError ? null : loaded;
 
   return (
     <section className="flex flex-col gap-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <h1 className="text-xl font-semibold">Providers & models</h1>
+        <h1 className="text-xl font-semibold">{t("providers.title")}</h1>
         <PeriodFilter value={period} />
       </div>
       <AutoRefresh
@@ -90,8 +87,9 @@ function TargetsList({
   if (targets.length === 0) {
     return (
       <p className="text-sm text-slate-600">
-        No target is configured: add routes to{" "}
-        <code className="font-mono text-xs">config/gateway.yaml</code>.
+        {richText(getTranslator(locale), "providers.empty", {
+          file: <code className="font-mono text-xs">config/gateway.yaml</code>,
+        })}
       </p>
     );
   }
@@ -120,6 +118,7 @@ function HealthSummary({
   targets: TargetsReport["targets"];
   locale: Locale;
 }) {
+  const t = getTranslator(locale);
   const counts = new Map<TargetHealth, number>();
   for (const target of targets) {
     const main = targetHealth(target)[0];
@@ -127,13 +126,16 @@ function HealthSummary({
   }
   return (
     <ul
-      aria-label="Targets by status"
+      aria-label={t("providers.byStatus")}
       className="flex flex-wrap items-center gap-2 text-sm"
     >
       {[...counts].map(([health, count]) => (
         <li key={health}>
           <Badge tone={HEALTH_TONES[health]}>
-            {TARGET_HEALTH_LABELS[health]}: {formatCount(locale, count)}
+            {t("providers.statusCount", {
+              status: t(`targetHealth.labels.${health}`),
+              count,
+            })}
           </Badge>
         </li>
       ))}

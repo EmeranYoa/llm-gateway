@@ -11,7 +11,11 @@ import type { components } from "@/api/schema";
 import { type Period, parsePeriod, parseTenant } from "./period";
 import { CURSOR_PARAM } from "./search-params";
 
-/** `answered`, `failed`, `client_error` or `cancelled` (see `app/admin_api/request_status.py`). */
+/**
+ * `answered`, `failed`, `client_error` or `cancelled` (see `app/admin_api/request_status.py`).
+ * Labels and definitions: `requestStatus.labels` and `requestStatus.definitions`
+ * in the dictionaries.
+ */
 export type RequestStatus = components["schemas"]["RequestStatus"];
 
 /** The statuses, in the order the screens offer them. */
@@ -21,13 +25,6 @@ export const REQUEST_STATUSES: readonly RequestStatus[] = [
   "client_error",
   "cancelled",
 ];
-
-export const REQUEST_STATUS_LABELS: Record<RequestStatus, string> = {
-  answered: "Answered",
-  failed: "Failed",
-  client_error: "Client error",
-  cancelled: "Cancelled",
-};
 
 /** Filters of the request list. `null` means no filter on that field. */
 export type RequestFilters = {

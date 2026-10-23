@@ -5,7 +5,7 @@ import { describeOutcome } from "./outcomes";
 describe("describeOutcome", () => {
   it("gives the kind of each outcome", () => {
     const kind = (outcome: string) =>
-      describeOutcome({ outcome, latency_ms: 100 }).kind;
+      describeOutcome({ outcome, latency_ms: 100 }, "en").kind;
 
     expect(kind("success")).toBe("success");
     expect(kind("cache_hit")).toBe("success");
@@ -20,16 +20,26 @@ describe("describeOutcome", () => {
 
   it("tells a too large request skipped by the gateway from one refused by the provider", () => {
     expect(
-      describeOutcome({ outcome: "context_too_large", latency_ms: null }),
+      describeOutcome({ outcome: "context_too_large", latency_ms: null }, "en"),
     ).toEqual({ kind: "skipped", label: "Too large for this target" });
     expect(
-      describeOutcome({ outcome: "context_too_large", latency_ms: 300 }).kind,
+      describeOutcome({ outcome: "context_too_large", latency_ms: 300 }, "en")
+        .kind,
     ).toBe("error");
+  });
+
+  it("names the outcome in the language of the page", () => {
+    expect(
+      describeOutcome({ outcome: "rate_limited", latency_ms: 100 }, "fr"),
+    ).toEqual({ kind: "error", label: "Limite de débit (429)" });
   });
 
   it("shows an outcome it does not know as it is", () => {
     expect(
-      describeOutcome({ outcome: "something_new", latency_ms: null }),
+      describeOutcome({ outcome: "something_new", latency_ms: null }, "fr"),
     ).toEqual({ kind: "error", label: "something_new" });
+    expect(
+      describeOutcome({ outcome: "toString", latency_ms: null }, "en").label,
+    ).toBe("toString");
   });
 });

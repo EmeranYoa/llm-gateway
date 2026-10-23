@@ -36,7 +36,7 @@ export default async function RequestsPage({
 }: PageProps<"/requests">) {
   const { filters, cursor } = parseRequestFilters(await searchParams);
 
-  const { locale } = await getI18n();
+  const { locale, t } = await getI18n();
   const [loaded, tenantNames] = await Promise.all([
     loadPage(filters, cursor).catch(keepApiError),
     loadTenantNames(),
@@ -55,6 +55,7 @@ export default async function RequestsPage({
         locale={locale}
       />
       <RequestsPagination
+        locale={locale}
         filters={filters}
         cursor={cursor}
         nextCursor={result.page.next_cursor}
@@ -69,7 +70,7 @@ export default async function RequestsPage({
   return (
     <section className="flex flex-col gap-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <h1 className="text-xl font-semibold">Requests</h1>
+        <h1 className="text-xl font-semibold">{t("requests.title")}</h1>
         <div className="flex flex-wrap gap-4">
           <PeriodFilter value={filters.period} />
           <TenantFilter value={filters.tenant} tenants={tenantNames} />
@@ -90,9 +91,7 @@ export default async function RequestsPage({
         </AutoRefresh>
       ) : (
         <>
-          <p className="text-xs text-slate-600">
-            Older requests: auto-refresh is off on this page.
-          </p>
+          <p className="text-xs text-slate-600">{t("requests.olderPage")}</p>
           {content}
         </>
       )}

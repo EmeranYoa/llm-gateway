@@ -3,12 +3,9 @@
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useId } from "react";
 
-import { type Period, PERIOD_LABELS, PERIODS } from "@/lib/period";
-import {
-  REQUEST_STATUS_LABELS,
-  REQUEST_STATUSES,
-  type RequestStatus,
-} from "@/lib/request-filters";
+import { useTranslator } from "@/lib/i18n/client";
+import { type Period, PERIODS } from "@/lib/period";
+import { REQUEST_STATUSES, type RequestStatus } from "@/lib/request-filters";
 import { CURSOR_PARAM, withSearchParam } from "@/lib/search-params";
 
 /**
@@ -67,13 +64,14 @@ function SelectFilter({ label, value, options, onChange }: SelectFilterProps) {
 /** Choose the period of the report: writes `?period=24h|7d|30d`. */
 export function PeriodFilter({ value }: { value: Period }) {
   const setSearchParam = useSetSearchParam();
+  const t = useTranslator();
   return (
     <SelectFilter
-      label="Period"
+      label={t("period.label")}
       value={value}
       options={PERIODS.map((period) => ({
         value: period,
-        label: PERIOD_LABELS[period],
+        label: t(`period.${period}`),
       }))}
       onChange={(period) => setSearchParam("period", period)}
     />
@@ -92,16 +90,17 @@ type TenantFilterProps = {
 /** Choose one tenant or all of them: writes `?tenant=<name>`, or removes it for all. */
 export function TenantFilter({ value, tenants }: TenantFilterProps) {
   const setSearchParam = useSetSearchParam();
+  const t = useTranslator();
   const names = [...tenants].sort((a, b) => a.localeCompare(b));
   if (value !== null && !names.includes(value)) {
     names.unshift(value);
   }
   return (
     <SelectFilter
-      label="Tenant"
+      label={t("filters.tenant")}
       value={value ?? ALL_TENANTS}
       options={[
-        { value: ALL_TENANTS, label: "All tenants" },
+        { value: ALL_TENANTS, label: t("filters.allTenants") },
         ...names.map((name) => ({ value: name, label: name })),
       ]}
       onChange={(tenant) => setSearchParam("tenant", tenant || null)}
@@ -119,15 +118,16 @@ export function RequestStatusFilter({
   value: RequestStatus | null;
 }) {
   const setSearchParam = useSetSearchParam();
+  const t = useTranslator();
   return (
     <SelectFilter
-      label="Status"
+      label={t("filters.status")}
       value={value ?? ALL_STATUSES}
       options={[
-        { value: ALL_STATUSES, label: "All statuses" },
+        { value: ALL_STATUSES, label: t("filters.allStatuses") },
         ...REQUEST_STATUSES.map((status) => ({
           value: status,
-          label: REQUEST_STATUS_LABELS[status],
+          label: t(`requestStatus.labels.${status}`),
         })),
       ]}
       onChange={(status) => setSearchParam("status", status || null)}
@@ -148,12 +148,13 @@ type AliasFilterProps = {
  */
 export function AliasFilter({ value, suggestions }: AliasFilterProps) {
   const setSearchParam = useSetSearchParam();
+  const t = useTranslator();
   const id = useId();
   const listId = `${id}-aliases`;
   return (
     <form
       role="search"
-      aria-label="Alias filter"
+      aria-label={t("filters.aliasSearch")}
       className="flex items-center gap-2 text-sm"
       onSubmit={(event) => {
         event.preventDefault();
@@ -162,7 +163,7 @@ export function AliasFilter({ value, suggestions }: AliasFilterProps) {
       }}
     >
       <label htmlFor={id} className="text-slate-600">
-        Alias
+        {t("filters.alias")}
       </label>
       <input
         // A new value from the server (back button, cleared filter) resets the field.
@@ -172,7 +173,7 @@ export function AliasFilter({ value, suggestions }: AliasFilterProps) {
         type="search"
         defaultValue={value ?? ""}
         list={listId}
-        placeholder="All aliases"
+        placeholder={t("filters.allAliases")}
         className="w-36 rounded border border-slate-300 bg-white px-2 py-1 text-slate-900 focus:ring-2 focus:ring-sky-600 focus:outline-none"
       />
       <datalist id={listId}>
@@ -184,7 +185,7 @@ export function AliasFilter({ value, suggestions }: AliasFilterProps) {
         type="submit"
         className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 hover:bg-slate-100 focus:ring-2 focus:ring-sky-600 focus:outline-none"
       >
-        Apply
+        {t("filters.apply")}
       </button>
     </form>
   );

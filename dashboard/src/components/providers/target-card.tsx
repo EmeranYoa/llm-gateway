@@ -1,7 +1,6 @@
 import type { TargetReport } from "@/api/client";
 import { Badge, type BadgeTone } from "@/components/badge";
 import { LocalDateTime } from "@/components/local-time";
-import { DEFINITIONS } from "@/lib/definitions";
 import {
   formatCount,
   formatDuration,
@@ -10,13 +9,10 @@ import {
   noValue,
 } from "@/lib/format";
 import type { Locale } from "@/lib/i18n/locale";
-import { type Period, PERIOD_LABELS } from "@/lib/period";
-import {
-  TARGET_HEALTH_DEFINITIONS,
-  TARGET_HEALTH_LABELS,
-  type TargetHealth,
-  targetHealth,
-} from "@/lib/target-health";
+import { richText } from "@/lib/i18n/rich-text";
+import { getTranslator, type Translator } from "@/lib/i18n/translator";
+import type { Period } from "@/lib/period";
+import { type TargetHealth, targetHealth } from "@/lib/target-health";
 
 type Statistics = TargetReport["statistics"];
 type LiveState = NonNullable<TargetReport["live"]>;
@@ -33,16 +29,23 @@ export const HEALTH_TONES: Record<TargetHealth, BadgeTone> = {
 };
 
 /** The status badges of a target: why it gets traffic, or why traffic goes elsewhere. */
-export function TargetHealthBadges({ target }: { target: TargetReport }) {
+export function TargetHealthBadges({
+  target,
+  locale,
+}: {
+  target: TargetReport;
+  locale: Locale;
+}) {
+  const t = getTranslator(locale);
   return (
-    <ul aria-label="Status" className="flex flex-wrap gap-1.5">
+    <ul aria-label={t("providers.status")} className="flex flex-wrap gap-1.5">
       {targetHealth(target).map((health) => (
         <li key={health}>
           <Badge
             tone={HEALTH_TONES[health]}
-            title={TARGET_HEALTH_DEFINITIONS[health]}
+            title={t(`targetHealth.definitions.${health}`)}
           >
-            {TARGET_HEALTH_LABELS[health]}
+            {t(`targetHealth.labels.${health}`)}
           </Badge>
         </li>
       ))}
@@ -115,71 +118,100 @@ function PeriodStatistics({
   period: Period;
   locale: Locale;
 }) {
+  const t = getTranslator(locale);
   return (
-    <section aria-label="Statistics of the period">
+    <section aria-label={t("providers.statistics")}>
       <h3 className="text-sm font-semibold text-slate-700">
-        {PERIOD_LABELS[period]}
+        {t(`period.${period}`)}
       </h3>
       <dl className="text-sm">
         <Figure
-          label="Calls"
+          label={t("providers.calls")}
           value={formatCount(locale, s.calls)}
-          title={DEFINITIONS.targetCalls}
+          title={t("definitions.targetCalls")}
         />
         <Figure
-          label="Success rate"
+          label={t("providers.successRate")}
           value={
             s.success_rate === null
               ? noValue(locale)
               : formatRate(locale, s.success_rate)
           }
-          title={DEFINITIONS.targetSuccessRate}
+          title={t("definitions.targetSuccessRate")}
         />
         <Figure
-          label="Latency p50 / p95"
+          label={t("providers.latency")}
           value={`${formatDuration(locale, s.latency_p50_ms)} / ${formatDuration(locale, s.latency_p95_ms)}`}
-          title={DEFINITIONS.targetLatency}
+          title={t("definitions.targetLatency")}
         />
       </dl>
-      <SubHeading title={DEFINITIONS.targetFailures}>Failures</SubHeading>
-      <dl className="text-sm">
-        <Count
-          locale={locale}
-          label="Rate limited (429)"
-          count={s.rate_limited}
-        />
-        <Count locale={locale} label="Timeouts" count={s.timeout} />
-        <Count locale={locale} label="Unavailable" count={s.unavailable} />
-        <Count locale={locale} label="Misconfigured" count={s.misconfigured} />
-        <Count
-          locale={locale}
-          label="Interrupted streams"
-          count={s.interrupted}
-        />
-        <Count
-          locale={locale}
-          label="Cancelled by the client"
-          count={s.cancelled}
-        />
-      </dl>
-      <SubHeading title={DEFINITIONS.targetSkips}>Skipped</SubHeading>
-      <dl className="text-sm">
-        <Count locale={locale} label="Cooldown" count={s.skipped_cooldown} />
-        <Count locale={locale} label="Breaker open" count={s.skipped_breaker} />
-        <Count locale={locale} label="Quota full" count={s.skipped_quota} />
-      </dl>
-      <SubHeading title={DEFINITIONS.targetRequestErrors}>
-        Caused by the request
+      <SubHeading title={t("definitions.targetFailures")}>
+        {t("providers.failures")}
       </SubHeading>
       <dl className="text-sm">
         <Count
           locale={locale}
-          label="Invalid requests"
+          label={t("providers.rateLimited")}
+          count={s.rate_limited}
+        />
+        <Count
+          locale={locale}
+          label={t("providers.timeouts")}
+          count={s.timeout}
+        />
+        <Count
+          locale={locale}
+          label={t("providers.unavailable")}
+          count={s.unavailable}
+        />
+        <Count
+          locale={locale}
+          label={t("providers.misconfigured")}
+          count={s.misconfigured}
+        />
+        <Count
+          locale={locale}
+          label={t("providers.interrupted")}
+          count={s.interrupted}
+        />
+        <Count
+          locale={locale}
+          label={t("providers.cancelled")}
+          count={s.cancelled}
+        />
+      </dl>
+      <SubHeading title={t("definitions.targetSkips")}>
+        {t("providers.skipped")}
+      </SubHeading>
+      <dl className="text-sm">
+        <Count
+          locale={locale}
+          label={t("providers.cooldown")}
+          count={s.skipped_cooldown}
+        />
+        <Count
+          locale={locale}
+          label={t("providers.breakerOpen")}
+          count={s.skipped_breaker}
+        />
+        <Count
+          locale={locale}
+          label={t("providers.quotaFull")}
+          count={s.skipped_quota}
+        />
+      </dl>
+      <SubHeading title={t("definitions.targetRequestErrors")}>
+        {t("providers.causedByRequest")}
+      </SubHeading>
+      <dl className="text-sm">
+        <Count
+          locale={locale}
+          label={t("providers.invalidRequests")}
           count={s.invalid_request}
         />
         <Count
           locale={locale}
-          label="Too large for the target"
+          label={t("providers.tooLarge")}
           count={s.context_too_large}
         />
       </dl>
@@ -211,18 +243,22 @@ function QuotaValue({ quota, locale }: { quota: Quota; locale: Locale }) {
   );
 }
 
-function CooldownValue({ cooldown }: { cooldown: LiveState["cooldown"] }) {
+function CooldownValue({
+  cooldown,
+  t,
+}: {
+  cooldown: LiveState["cooldown"];
+  t: Translator;
+}) {
   if (!cooldown?.active) {
-    return "None";
+    return t("providers.cooldownNone");
   }
   if (cooldown.until === null) {
-    return "Active";
+    return t("providers.cooldownActive");
   }
-  return (
-    <>
-      Active until <LocalDateTime iso={cooldown.until} seconds />
-    </>
-  );
+  return richText(t, "providers.cooldownUntil", {
+    time: <LocalDateTime iso={cooldown.until} seconds />,
+  });
 }
 
 function BreakerValue({
@@ -232,24 +268,23 @@ function BreakerValue({
   breaker: LiveState["breaker"];
   locale: Locale;
 }) {
+  const t = getTranslator(locale);
   if (breaker === null) {
     return noValue(locale);
   }
   if (breaker.state === "open") {
-    return breaker.open_until === null ? (
-      "Open"
-    ) : (
-      <>
-        Open until <LocalDateTime iso={breaker.open_until} seconds />
-      </>
-    );
+    return breaker.open_until === null
+      ? t("providers.breakerOpenState")
+      : richText(t, "providers.breakerOpenUntil", {
+          time: <LocalDateTime iso={breaker.open_until} seconds />,
+        });
   }
   if (breaker.state === "half_open") {
     return breaker.trial_running
-      ? "Half-open, trial call running"
-      : "Half-open, waiting for a trial call";
+      ? t("providers.halfOpenTrialRunning")
+      : t("providers.halfOpenWaiting");
   }
-  return "Closed";
+  return t("providers.breakerClosed");
 }
 
 function LiveStateSection({
@@ -259,60 +294,62 @@ function LiveStateSection({
   live: LiveState | null;
   locale: Locale;
 }) {
+  const t = getTranslator(locale);
   if (live === null) {
     return (
-      <section aria-label="Live state">
-        <h3 className="text-sm font-semibold text-slate-700">Now</h3>
-        <p className="mt-1 text-sm text-slate-600">
-          This target is in no route any more: the gateway does not use it.
-        </p>
+      <section aria-label={t("providers.liveState")}>
+        <h3 className="text-sm font-semibold text-slate-700">
+          {t("providers.now")}
+        </h3>
+        <p className="mt-1 text-sm text-slate-600">{t("providers.removed")}</p>
       </section>
     );
   }
   const known = live.status === "known";
   return (
-    <section aria-label="Live state">
-      <h3 className="text-sm font-semibold text-slate-700">Now</h3>
+    <section aria-label={t("providers.liveState")}>
+      <h3 className="text-sm font-semibold text-slate-700">
+        {t("providers.now")}
+      </h3>
       {!known && (
         <p className="mt-1 rounded bg-slate-100 px-2 py-1 text-xs text-slate-700">
-          Live state unavailable (Redis): cooldown, breaker and used quotas
-          cannot be read. Only the configured limits are shown.
+          {t("providers.liveUnknown")}
         </p>
       )}
       <dl className="text-sm">
         {known && (
           <>
             <Figure
-              label="Cooldown"
-              value={<CooldownValue cooldown={live.cooldown} />}
-              title={DEFINITIONS.cooldown}
+              label={t("providers.cooldown")}
+              value={<CooldownValue cooldown={live.cooldown} t={t} />}
+              title={t("definitions.cooldown")}
               highlight={live.cooldown?.active}
             />
             <Figure
-              label="Circuit breaker"
+              label={t("providers.breaker")}
               value={<BreakerValue breaker={live.breaker} locale={locale} />}
-              title={DEFINITIONS.breaker}
+              title={t("definitions.breaker")}
               highlight={live.breaker?.state !== "closed"}
             />
           </>
         )}
         <Figure
-          label="Requests per minute"
+          label={t("providers.rpm")}
           value={<QuotaValue locale={locale} quota={live.rpm} />}
-          title={DEFINITIONS.rpm}
+          title={t("definitions.rpm")}
         />
         <Figure
-          label="Tokens per minute"
+          label={t("providers.tpm")}
           value={<QuotaValue locale={locale} quota={live.tpm} />}
-          title={DEFINITIONS.tpm}
+          title={t("definitions.tpm")}
         />
         <Figure
-          label="Requests per day"
+          label={t("providers.rpd")}
           value={<QuotaValue locale={locale} quota={live.rpd} />}
-          title={DEFINITIONS.rpd}
+          title={t("definitions.rpd")}
         />
         <Figure
-          label="Daily reset"
+          label={t("providers.dailyReset")}
           value={<LocalDateTime iso={live.rpd.resets_at} />}
         />
       </dl>
@@ -341,7 +378,7 @@ export function TargetCard({
           <span className="text-slate-500">{target.provider}/</span>
           {target.model}
         </h2>
-        <TargetHealthBadges target={target} />
+        <TargetHealthBadges target={target} locale={locale} />
       </header>
       <div className="mt-3 grid gap-6 md:grid-cols-2">
         <PeriodStatistics

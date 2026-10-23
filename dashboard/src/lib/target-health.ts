@@ -8,6 +8,10 @@ import type { components } from "@/api/schema";
 type TargetReport = components["schemas"]["TargetReport"];
 type TargetLiveState = components["schemas"]["TargetLiveState"];
 
+/**
+ * Why a target gets traffic or not. Each one has a label and a definition in
+ * the dictionaries: `targetHealth.labels.<health>`, `targetHealth.definitions.<health>`.
+ */
 export type TargetHealth =
   | "healthy"
   | "cooling_down"
@@ -16,33 +20,6 @@ export type TargetHealth =
   | "quota_full"
   | "live_unknown"
   | "removed";
-
-export const TARGET_HEALTH_LABELS: Record<TargetHealth, string> = {
-  healthy: "Healthy",
-  cooling_down: "Cooling down",
-  breaker_open: "Breaker open",
-  half_open: "Breaker half-open",
-  quota_full: "Quota full",
-  live_unknown: "Live state unavailable (Redis)",
-  removed: "No longer configured",
-};
-
-export const TARGET_HEALTH_DEFINITIONS: Record<TargetHealth, string> = {
-  healthy:
-    "No cooldown, breaker closed, quotas not full: the target gets traffic.",
-  cooling_down:
-    "A 429 or a misconfiguration error started a cooldown: the target is skipped until it ends.",
-  breaker_open:
-    "Too many failures opened the circuit breaker: the target is skipped until it turns half-open.",
-  half_open:
-    "The breaker lets one trial call through. Its result closes the breaker again or opens it.",
-  quota_full:
-    "A requests or tokens quota is used up: the target is skipped until the window frees room.",
-  live_unknown:
-    "Redis cannot be read: cooldowns, breakers and used quotas are unknown. The gateway routes without them (degraded mode).",
-  removed:
-    "This target is in no route any more. It is shown because it has usage in the period.",
-};
 
 /** The quotas used up right now: `RPM`, `TPM`, `RPD`. */
 export function fullQuotas(live: TargetLiveState): string[] {

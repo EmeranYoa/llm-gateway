@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { CreatedKey } from "@/api/tenant-keys";
+import { useTranslator } from "@/lib/i18n/client";
 
 import { secondaryButtonClass } from "./form-feedback";
 
@@ -21,6 +22,7 @@ export function NewKeyNotice({
   createdKey: CreatedKey;
   onDismiss: () => void;
 }) {
+  const t = useTranslator();
   const [copy, setCopy] = useState<CopyState>("idle");
   const heading = useRef<HTMLHeadingElement>(null);
 
@@ -51,14 +53,13 @@ export function NewKeyNotice({
         tabIndex={-1}
         className="font-semibold focus:outline-none"
       >
-        New key for tenant {createdKey.tenant}
+        {t("keys.newKey.heading", { tenant: createdKey.tenant })}
       </h3>
       <p className="text-sm font-medium text-amber-900">
-        Copy this key now. It will never be shown again: the gateway stores only
-        a hash of it. Leaving or refreshing this page loses it.
+        {t("keys.newKey.warning")}
       </p>
       <code
-        aria-label="New API key"
+        aria-label={t("keys.newKey.label")}
         className="block rounded border border-amber-200 bg-white px-3 py-2 font-mono text-sm break-all select-all"
       >
         {createdKey.key}
@@ -69,23 +70,22 @@ export function NewKeyNotice({
           onClick={copyKey}
           className={secondaryButtonClass}
         >
-          Copy key
+          {t("keys.newKey.copy")}
         </button>
         <button
           type="button"
           onClick={onDismiss}
           className={secondaryButtonClass}
         >
-          I have stored the key
+          {t("keys.newKey.stored")}
         </button>
         <span role="status" className="text-sm">
-          {copy === "copied" && "Copied to the clipboard."}
+          {copy === "copied" && t("keys.newKey.copied")}
         </span>
       </div>
       {copy === "failed" && (
         <p role="alert" className="text-sm text-red-800">
-          Copying is not available in this browser. Select the key above and
-          copy it by hand (Ctrl+C or Cmd+C).
+          {t("keys.newKey.copyFailed")}
         </p>
       )}
     </section>

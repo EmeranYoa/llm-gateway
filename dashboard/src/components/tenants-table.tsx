@@ -1,58 +1,61 @@
 import Link from "next/link";
 
 import type { TenantStatistics } from "@/api/client";
-import { DEFINITIONS } from "@/lib/definitions";
 import { formatCount, formatMoney, formatRate } from "@/lib/format";
 import type { Locale } from "@/lib/i18n/locale";
+import { richText } from "@/lib/i18n/rich-text";
+import { getTranslator, type Translator } from "@/lib/i18n/translator";
 import type { Period } from "@/lib/period";
 import { overviewHref } from "@/lib/search-params";
 
 type Column = {
-  label: string;
-  /** Shown as the `title` of the header cell. */
-  definition?: string;
-  value: (tenant: TenantStatistics, locale: Locale) => string;
+  /** The figure: its header (`tenants.<id>`) and its definition (`definitions.<id>`). */
+  id:
+    | "requests"
+    | "tokens"
+    | "cost"
+    | "errorRate"
+    | "cacheHits"
+    | "savedCost"
+    | "quotaRefusals";
+  value: (tenant: TenantStatistics, locale: Locale, t: Translator) => string;
 };
 
 const COLUMNS: Column[] = [
   {
-    label: "Requests",
-    definition: DEFINITIONS.requests,
-    value: (t, locale) => formatCount(locale, t.requests),
+    id: "requests",
+    value: (tenant, locale) => formatCount(locale, tenant.requests),
   },
   {
-    label: "Tokens",
-    definition: DEFINITIONS.tokens,
-    value: (t, locale) => formatCount(locale, t.tokens),
+    id: "tokens",
+    value: (tenant, locale) => formatCount(locale, tenant.tokens),
   },
   {
-    label: "Cost",
-    definition: DEFINITIONS.cost,
+    id: "cost",
     // An unknown price is never counted as 0: say how many answers are left out.
-    value: (t, locale) =>
-      t.unpriced_requests > 0
-        ? `${formatMoney(locale, t.cost_usd)} (${formatCount(locale, t.unpriced_requests)} without a price)`
-        : formatMoney(locale, t.cost_usd),
+    value: (tenant, locale, t) =>
+      tenant.unpriced_requests > 0
+        ? t("tenants.costWithUnpriced", {
+            cost: formatMoney(locale, tenant.cost_usd),
+            count: tenant.unpriced_requests,
+          })
+        : formatMoney(locale, tenant.cost_usd),
   },
   {
-    label: "Error rate",
-    definition: DEFINITIONS.errorRate,
-    value: (t, locale) => formatRate(locale, t.error_rate),
+    id: "errorRate",
+    value: (tenant, locale) => formatRate(locale, tenant.error_rate),
   },
   {
-    label: "Cache hits",
-    definition: DEFINITIONS.cacheHits,
-    value: (t, locale) => formatCount(locale, t.cache_hits),
+    id: "cacheHits",
+    value: (tenant, locale) => formatCount(locale, tenant.cache_hits),
   },
   {
-    label: "Saved cost",
-    definition: DEFINITIONS.savedCost,
-    value: (t, locale) => formatMoney(locale, t.saved_cost_usd),
+    id: "savedCost",
+    value: (tenant, locale) => formatMoney(locale, tenant.saved_cost_usd),
   },
   {
-    label: "Quota refusals",
-    definition: DEFINITIONS.quotaRefusals,
-    value: (t, locale) => formatCount(locale, t.quota_refusals),
+    id: "quotaRefusals",
+    value: (tenant, locale) => formatCount(locale, tenant.quota_refusals),
   },
 ];
 
@@ -68,14 +71,17 @@ type TenantsTableProps = {
  * and the same period (the tenant name is a link that covers the whole row).
  */
 export function TenantsTable({ tenants, period, locale }: TenantsTableProps) {
+  const t = getTranslator(locale);
   if (tenants.length === 0) {
     return (
       <p className="text-sm text-slate-600">
-        No tenant yet. Create one with{" "}
-        <code className="font-mono text-xs">
-          python -m app.admin create-key --tenant name
-        </code>
-        .
+        {richText(t, "tenants.empty", {
+          command: (
+            <code className="font-mono text-xs">
+              python -m app.admin create-key --tenant name
+            </code>
+          ),
+        })}
       </p>
     );
   }
@@ -86,16 +92,16 @@ export function TenantsTable({ tenants, period, locale }: TenantsTableProps) {
         <thead className="bg-slate-50 text-left text-xs text-slate-600">
           <tr>
             <th scope="col" className="px-4 py-2 font-medium">
-              Tenant
+              {t("tenants.tenant")}
             </th>
             {COLUMNS.map((column) => (
               <th
-                key={column.label}
+                key={column.id}
                 scope="col"
-                title={column.definition}
+                title={t(`definitions.${column.id}`)}
                 className="px-4 py-2 text-right font-medium"
               >
-                {column.label}
+                {t(`tenants.${column.id}`)}
               </th>
             ))}
           </tr>
@@ -116,10 +122,10 @@ export function TenantsTable({ tenants, period, locale }: TenantsTableProps) {
               </th>
               {COLUMNS.map((column) => (
                 <td
-                  key={column.label}
+                  key={column.id}
                   className="px-4 py-2 text-right text-slate-900 tabular-nums"
                 >
-                  {column.value(tenant, locale)}
+                  {column.value(tenant, locale, t)}
                 </td>
               ))}
             </tr>

@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { LocaleProvider } from "@/lib/i18n/client";
 import type { CreateKeyState } from "@/lib/key-actions";
 
 import { CreateKeyForm } from "./create-key-form";
@@ -191,7 +192,12 @@ describe("CreateKeyForm", () => {
   it("shows the error returned by the action, and keeps the values typed", async () => {
     const action = fakeAction({
       status: "error",
-      message: "The admin API refused the values. Invalid value for 'rpm'.",
+      error: {
+        kind: "api",
+        status: 400,
+        code: null,
+        message: "Invalid value for 'rpm'.",
+      },
     });
     render(<CreateKeyForm action={action} tenants={[]} />);
 
@@ -199,9 +205,31 @@ describe("CreateKeyForm", () => {
     fill("Requests per minute (optional)", "99999999999");
     submit();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Invalid value for 'rpm'.",
-    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("The admin API refused the values.");
+    expect(alert).toHaveTextContent("Invalid value for 'rpm'.");
     expect(screen.getByLabelText("Tenant")).toHaveValue("acme");
+  });
+
+  it("speaks French, checks of the form included", async () => {
+    const action = fakeAction(CREATED);
+    render(
+      <LocaleProvider locale="fr">
+        <CreateKeyForm action={action} tenants={[]} />
+      </LocaleProvider>,
+    );
+
+    fireEvent.change(screen.getByLabelText("Tenant"), {
+      target: { value: "acme" },
+    });
+    fireEvent.change(screen.getByLabelText("Tokens par jour (facultatif)"), {
+      target: { value: "0" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Créer la clé" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Tokens par jour : saisissez un nombre entier supérieur à 0.",
+    );
+    expect(action).not.toHaveBeenCalled();
   });
 });

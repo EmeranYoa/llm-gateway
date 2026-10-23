@@ -1,5 +1,8 @@
 import { useId } from "react";
 
+import type { Locale } from "@/lib/i18n/locale";
+import { getTranslator } from "@/lib/i18n/translator";
+
 type StatCardProps = {
   /** Name of the figure, e.g. "Error rate". */
   label: string;
@@ -11,6 +14,8 @@ type StatCardProps = {
   detail?: React.ReactNode;
   /** Optional warning under the value, e.g. "3 requests without a price". */
   warning?: string;
+  /** Language of the page, for the name of the "i" button. */
+  locale: Locale;
 };
 
 /**
@@ -24,8 +29,10 @@ export function StatCard({
   definition,
   detail,
   warning,
+  locale,
 }: StatCardProps) {
   const tooltipId = useId();
+  const t = getTranslator(locale);
 
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
@@ -34,7 +41,7 @@ export function StatCard({
         <span className="group relative inline-flex">
           <button
             type="button"
-            aria-label={`Definition of ${label}`}
+            aria-label={t("statCard.definitionOf", { label })}
             aria-describedby={tooltipId}
             className="inline-flex size-4 items-center justify-center rounded-full border border-slate-400 text-[10px] leading-none font-semibold text-slate-600 hover:border-slate-700 hover:text-slate-900 focus:ring-2 focus:ring-sky-600 focus:outline-none"
           >

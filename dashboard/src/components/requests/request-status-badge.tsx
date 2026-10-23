@@ -1,9 +1,8 @@
 import { Badge, type BadgeTone } from "@/components/badge";
-import { REQUEST_STATUS_DEFINITIONS } from "@/lib/definitions";
-import {
-  REQUEST_STATUS_LABELS,
-  type RequestStatus,
-} from "@/lib/request-filters";
+import type { Locale } from "@/lib/i18n/locale";
+import { getTranslator } from "@/lib/i18n/translator";
+import type { RequestStatus } from "@/lib/request-filters";
+import { en } from "@/messages/en";
 
 const STATUS_TONES: Record<RequestStatus, BadgeTone> = {
   answered: "green",
@@ -13,13 +12,20 @@ const STATUS_TONES: Record<RequestStatus, BadgeTone> = {
 };
 
 /** The status of a request, with its definition in a tooltip. */
-export function RequestStatusBadge({ status }: { status: RequestStatus }) {
+export function RequestStatusBadge({
+  status,
+  locale,
+}: {
+  status: RequestStatus;
+  locale: Locale;
+}) {
+  const t = getTranslator(locale);
   return (
     <Badge
       tone={STATUS_TONES[status]}
-      title={REQUEST_STATUS_DEFINITIONS[status]}
+      title={t(`requestStatus.definitions.${status}`)}
     >
-      {REQUEST_STATUS_LABELS[status]}
+      {t(`requestStatus.labels.${status}`)}
     </Badge>
   );
 }
@@ -28,12 +34,18 @@ export function RequestStatusBadge({ status }: { status: RequestStatus }) {
 export function AnsweredBy({
   provider,
   model,
+  locale,
 }: {
   provider: string | null;
   model: string | null;
+  locale: Locale;
 }) {
   if (provider === null || model === null) {
-    return <span className="text-slate-500">not answered</span>;
+    return (
+      <span className="text-slate-500">
+        {getTranslator(locale)("requests.notAnswered")}
+      </span>
+    );
   }
   return (
     <span className="font-mono text-xs break-all">
@@ -42,7 +54,15 @@ export function AnsweredBy({
   );
 }
 
-/** What the response cache did, or "off" when the alias does not use it. */
-export function cacheLabel(cache: string | null): string {
-  return cache ?? "off";
+/**
+ * What the response cache did (`hit`, `miss`, `bypass`, `unavailable`), or
+ * "off" when the alias does not use it. A value added to the gateway after this
+ * dashboard is shown as it is.
+ */
+export function cacheLabel(cache: string | null, locale: Locale): string {
+  const value = cache ?? "off";
+  if (!Object.hasOwn(en.cache, value)) {
+    return value;
+  }
+  return getTranslator(locale)(`cache.${value as keyof typeof en.cache}`);
 }

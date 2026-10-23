@@ -9,7 +9,9 @@ import {
   noValue,
 } from "@/lib/format";
 import type { Locale } from "@/lib/i18n/locale";
+import { getTranslator } from "@/lib/i18n/translator";
 import { type RequestFilters, requestHref } from "@/lib/request-filters";
+import type { en } from "@/messages/en";
 
 import {
   AnsweredBy,
@@ -25,38 +27,29 @@ type RequestsTableProps = {
   locale: Locale;
 };
 
-const HEADERS: { label: string; title?: string; numeric?: boolean }[] = [
-  { label: "Time" },
-  { label: "Tenant" },
-  { label: "Alias" },
-  {
-    label: "Status",
-    title:
-      "Answered, failed (gateway or providers), client error (request refused) or cancelled (the client left).",
-  },
-  {
-    label: "HTTP",
-    title: "HTTP status of the last target examined.",
-    numeric: true,
-  },
-  { label: "Answered by", title: "Provider and model of the answer." },
-  {
-    label: "Attempts",
-    title: "Targets examined, skips included.",
-    numeric: true,
-  },
-  { label: "Stream" },
-  {
-    label: "Latency",
-    title: "Sum of the durations of the attempts.",
-    numeric: true,
-  },
-  { label: "Cost", numeric: true },
-  {
-    label: "Cache",
-    title:
-      "What the response cache did: hit, miss, bypass or unavailable. Off when the alias does not use it.",
-  },
+type Column = keyof typeof en.requests.columns;
+type DefinedColumn = keyof typeof en.requests.columnDefinitions;
+
+/**
+ * The columns, in order. Each has a header (`requests.columns`); some have a
+ * definition in the `title` of the header (`requests.columnDefinitions`).
+ */
+const COLUMNS: {
+  id: Column;
+  definition?: DefinedColumn;
+  numeric?: boolean;
+}[] = [
+  { id: "time" },
+  { id: "tenant" },
+  { id: "alias" },
+  { id: "status", definition: "status" },
+  { id: "http", definition: "http", numeric: true },
+  { id: "answeredBy", definition: "answeredBy" },
+  { id: "attempts", definition: "attempts", numeric: true },
+  { id: "stream" },
+  { id: "latency", definition: "latency", numeric: true },
+  { id: "cost", numeric: true },
+  { id: "cache", definition: "cache" },
 ];
 
 /** One row per request, newest first. The time of a row opens its detail. */
@@ -66,12 +59,9 @@ export function RequestsTable({
   cursor,
   locale,
 }: RequestsTableProps) {
+  const t = getTranslator(locale);
   if (requests.length === 0) {
-    return (
-      <p className="text-sm text-slate-600">
-        No request matches these filters in the period.
-      </p>
-    );
+    return <p className="text-sm text-slate-600">{t("requests.empty")}</p>;
   }
 
   return (
@@ -79,14 +69,17 @@ export function RequestsTable({
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-left text-xs text-slate-600">
           <tr>
-            {HEADERS.map((header) => (
+            {COLUMNS.map((column) => (
               <th
-                key={header.label}
+                key={column.id}
                 scope="col"
-                title={header.title}
-                className={`px-3 py-2 font-medium whitespace-nowrap ${header.numeric ? "text-right" : ""}`}
+                title={
+                  column.definition &&
+                  t(`requests.columnDefinitions.${column.definition}`)
+                }
+                className={`px-3 py-2 font-medium whitespace-nowrap ${column.numeric ? "text-right" : ""}`}
               >
-                {header.label}
+                {t(`requests.columns.${column.id}`)}
               </th>
             ))}
           </tr>
@@ -103,7 +96,9 @@ export function RequestsTable({
               >
                 <Link
                   href={requestHref(request.request_id, filters, cursor)}
-                  aria-label={`Details of request ${request.request_id}`}
+                  aria-label={t("requests.detailsOf", {
+                    id: request.request_id,
+                  })}
                   title={request.request_id}
                   className="text-sky-800 after:absolute after:inset-0 hover:underline focus:outline-none"
                 >
@@ -117,25 +112,31 @@ export function RequestsTable({
               </td>
               <td className="px-3 py-2 font-mono text-xs">{request.alias}</td>
               <td className="px-3 py-2">
-                <RequestStatusBadge status={request.status} />
+                <RequestStatusBadge status={request.status} locale={locale} />
               </td>
               <td className="px-3 py-2 text-right tabular-nums">
                 {request.status_code ?? noValue(locale)}
               </td>
               <td className="px-3 py-2">
-                <AnsweredBy provider={request.provider} model={request.model} />
+                <AnsweredBy
+                  provider={request.provider}
+                  model={request.model}
+                  locale={locale}
+                />
               </td>
               <td className="px-3 py-2 text-right tabular-nums">
                 {formatCount(locale, request.attempts)}
               </td>
-              <td className="px-3 py-2">{request.stream ? "yes" : "no"}</td>
+              <td className="px-3 py-2">
+                {request.stream ? t("requests.yes") : t("requests.no")}
+              </td>
               <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">
                 {formatDuration(locale, request.latency_ms)}
               </td>
               <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">
                 {formatMoney(locale, request.cost_usd)}
               </td>
-              <td className="px-3 py-2">{cacheLabel(request.cache)}</td>
+              <td className="px-3 py-2">{cacheLabel(request.cache, locale)}</td>
             </tr>
           ))}
         </tbody>

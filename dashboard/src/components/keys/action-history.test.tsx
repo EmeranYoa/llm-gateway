@@ -62,7 +62,9 @@ describe("ActionHistory", () => {
 
     const [first, second] = bodyRows();
     expect(first).toHaveTextContent("alice");
-    expect(first).toHaveTextContent("create-key");
+    expect(within(first).getByTitle("create-key")).toHaveTextContent(
+      "Create key",
+    );
     expect(first).toHaveTextContent("acme");
     expect(first).toHaveTextContent("key id 9, prefix gw_abcdef, rpm 30");
     expect(within(first).getByText(/2026/).tagName).toBe("TIME");
@@ -97,7 +99,12 @@ describe("ActionHistory", () => {
         firstPage={{ actions: [action(2)], next_before: 2 }}
         loadMore={loader({
           status: "error",
-          message: "The database is unavailable. Try again later.",
+          error: {
+            kind: "api",
+            status: 503,
+            code: "database_unavailable",
+            message: "The database is unavailable. Try again later.",
+          },
         })}
       />,
     );
@@ -127,17 +134,22 @@ describe("ActionHistory", () => {
 
 describe("summarizeDetails", () => {
   it("names a cache clear of every alias", () => {
+    const clear = action(1, {
+      action: "clear-cache",
+      details: { alias: null, removed: 4 },
+    });
+
+    expect(summarizeDetails(clear, "en")).toBe("every alias, removed 4");
+    expect(summarizeDetails(clear, "fr")).toBe("tous les alias, supprimées 4");
+  });
+
+  it("shows a detail it does not know with its raw name", () => {
     expect(
-      summarizeDetails(
-        action(1, {
-          action: "clear-cache",
-          details: { alias: null, removed: 4 },
-        }),
-      ),
-    ).toBe("every alias, removed 4");
+      summarizeDetails(action(1, { details: { brand_new: 2 } }), "fr"),
+    ).toBe("brand new 2");
   });
 
   it("shows a dash when there is no detail", () => {
-    expect(summarizeDetails(action(1, { details: {} }))).toBe("-");
+    expect(summarizeDetails(action(1, { details: {} }), "en")).toBe("-");
   });
 });

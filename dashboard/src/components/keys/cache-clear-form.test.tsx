@@ -63,7 +63,12 @@ describe("CacheClearForm", () => {
       <CacheClearForm
         action={fakeAction({
           status: "error",
-          message: "Redis is unavailable. Try again later.",
+          error: {
+            kind: "api",
+            status: 503,
+            code: "redis_unavailable",
+            message: "Redis is unavailable. Try again later.",
+          },
         })}
         tenant="acme"
       />,

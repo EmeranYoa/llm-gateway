@@ -26,7 +26,7 @@ export function useCheckedAction<S>(
     async (previous, form) => {
       const checked = check(form);
       if (!checked.ok) {
-        return { status: "error", message: checked.error };
+        return { status: "error", error: checked.error };
       }
       return action(previous, form);
     },

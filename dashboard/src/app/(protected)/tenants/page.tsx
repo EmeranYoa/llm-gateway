@@ -16,14 +16,14 @@ export default async function TenantsPage({
 }: PageProps<"/tenants">) {
   const period = parsePeriod((await searchParams).period);
 
-  const { locale } = await getI18n();
+  const { locale, t } = await getI18n();
   const report = await getTenantStatistics(period).catch(keepApiError);
   const list = report instanceof AdminApiError ? null : report;
 
   return (
     <section className="flex flex-col gap-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <h1 className="text-xl font-semibold">Tenants</h1>
+        <h1 className="text-xl font-semibold">{t("tenants.title")}</h1>
         <PeriodFilter value={period} />
       </div>
       <AutoRefresh
