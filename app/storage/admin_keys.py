@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.auth.keys import ADMIN_KEY_PREFIX, display_prefix, generate_key, hash_key
+from app.storage.admin_actions import Action, Actor, record_action
 from app.storage.db import Base
 from app.storage.tenants import Revocation
 
@@ -60,21 +61,29 @@ class AdminKeyInfo:
     revoked_at: dt.datetime | None
 
 
-async def create_admin_key(engine: AsyncEngine, name: str) -> NewAdminKey:
-    """Create an admin key for `name`."""
+async def create_admin_key(
+    engine: AsyncEngine, name: str, *, actor: Actor | None = None
+) -> NewAdminKey:
+    """Create an admin key for `name`. With `actor`, record the action in the same transaction."""
     key = generate_key(ADMIN_KEY_PREFIX)
+    prefix = display_prefix(key)
     async with engine.begin() as connection:
         admin_key_id = await connection.scalar(
             insert(AdminKeyRow)
             .values(
                 name=name,
                 key_hash=hash_key(key),
-                prefix=display_prefix(key),
+                prefix=prefix,
                 created_at=dt.datetime.now(dt.UTC),
             )
             .returning(AdminKeyRow.id)
         )
-    assert admin_key_id is not None
+        assert admin_key_id is not None
+        if actor is not None:
+            details = {"name": name, "prefix": prefix}
+            await record_action(
+                connection, actor, Action.CREATE_ADMIN_KEY, str(admin_key_id), details
+            )
     return NewAdminKey(key=key, identity=AdminIdentity(admin_key_id, name))
 
 
@@ -93,16 +102,27 @@ async def list_admin_keys(engine: AsyncEngine) -> list[AdminKeyInfo]:
     return [AdminKeyInfo(*row) for row in rows]
 
 
-async def revoke_admin_key(engine: AsyncEngine, admin_key_id: int) -> Revocation:
-    """Revoke an admin key: the admin API refuses it once its key caches expire."""
+async def revoke_admin_key(
+    engine: AsyncEngine, admin_key_id: int, *, actor: Actor | None = None
+) -> Revocation:
+    """Revoke an admin key: the admin API refuses it once its key caches expire.
+
+    With `actor`, record the action in the same transaction.
+    """
+    revoke = (
+        update(AdminKeyRow)
+        .where(AdminKeyRow.id == admin_key_id, AdminKeyRow.revoked_at.is_(None))
+        .values(revoked_at=dt.datetime.now(dt.UTC))
+        .returning(AdminKeyRow.name, AdminKeyRow.prefix)
+    )
     async with engine.begin() as connection:
-        revoked_id = await connection.scalar(
-            update(AdminKeyRow)
-            .where(AdminKeyRow.id == admin_key_id, AdminKeyRow.revoked_at.is_(None))
-            .values(revoked_at=dt.datetime.now(dt.UTC))
-            .returning(AdminKeyRow.id)
-        )
-        if revoked_id is not None:
+        revoked = (await connection.execute(revoke)).first()
+        if revoked is not None:
+            if actor is not None:
+                details = {"name": revoked.name, "prefix": revoked.prefix}
+                await record_action(
+                    connection, actor, Action.REVOKE_ADMIN_KEY, str(admin_key_id), details
+                )
             return Revocation.REVOKED
         existing_id = await connection.scalar(
             select(AdminKeyRow.id).where(AdminKeyRow.id == admin_key_id)

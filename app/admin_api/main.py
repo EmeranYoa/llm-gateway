@@ -20,7 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.admin_api import requests, statistics, targets
+from app.admin_api import actions, requests, statistics, targets
 from app.admin_api.routes import router
 from app.api.routes import (
     authentication_unavailable_handler,
@@ -77,6 +77,7 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(statistics.router)
     app.include_router(targets.router)
     app.include_router(requests.router)
+    app.include_router(actions.router)
     return app
 
 

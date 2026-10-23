@@ -14,7 +14,8 @@ Usage:
 
 A full key is printed only once, by create-key or create-admin-key. Other commands
 show a short prefix. Admin keys (`gwa_`) open the admin API only, never the gateway;
-they can only be created here, never through the web.
+they can only be created here, never through the web. Every change is recorded in
+the history of admin actions, with `cli` as the actor.
 It uses the same `DATABASE_URL` and `REDIS_URL` as the gateway.
 """
 
@@ -29,6 +30,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.cache.store import ResponseCache
 from app.config import Settings
+from app.storage.admin_actions import CLI, record_cache_clear
 from app.storage.admin_keys import (
     AdminKeyInfo,
     create_admin_key,
@@ -132,7 +134,9 @@ def _add_limit_arguments(command: argparse.ArgumentParser) -> None:
 async def _create_key(tenant: str, rpm: int | None, tokens_per_day: int | None) -> int:
     engine = create_async_engine(Settings().database_url)
     try:
-        new_key = await create_api_key(engine, tenant, rpm=rpm, tokens_per_day=tokens_per_day)
+        new_key = await create_api_key(
+            engine, tenant, rpm=rpm, tokens_per_day=tokens_per_day, actor=CLI
+        )
     finally:
         await engine.dispose()
     print(f"API key for tenant '{tenant}' (shown only once, store it now):")
@@ -153,7 +157,7 @@ async def _list_keys(tenant: str | None) -> int:
 async def _revoke_key(api_key_id: int) -> int:
     engine = create_async_engine(Settings().database_url)
     try:
-        revocation = await revoke_api_key(engine, api_key_id)
+        revocation = await revoke_api_key(engine, api_key_id, actor=CLI)
     finally:
         await engine.dispose()
     match revocation:
@@ -170,10 +174,12 @@ async def _revoke_key(api_key_id: int) -> int:
 async def _set_limits(tenant: str, rpm: int | None, tokens_per_day: int | None) -> int:
     engine = create_async_engine(Settings().database_url)
     try:
-        found = await set_tenant_limits(engine, tenant, rpm=rpm, tokens_per_day=tokens_per_day)
+        limits = await set_tenant_limits(
+            engine, tenant, rpm=rpm, tokens_per_day=tokens_per_day, actor=CLI
+        )
     finally:
         await engine.dispose()
-    if not found:
+    if limits is None:
         print(f"Error: unknown tenant '{tenant}'.", file=sys.stderr)
         return 1
     changes = []
@@ -188,22 +194,23 @@ async def _set_limits(tenant: str, rpm: int | None, tokens_per_day: int | None) 
 async def _clear_cache(tenant: str | None, alias: str | None) -> int:
     """Remove the cached answers of `tenant` (every tenant if None), or of one of its aliases."""
     settings = Settings()
-    tenant_id = None
-    if tenant is not None:
-        engine = create_async_engine(settings.database_url)
-        try:
-            tenant_id = await find_tenant_id(engine, tenant)
-        finally:
-            await engine.dispose()
-        if tenant_id is None:
-            print(f"Error: unknown tenant '{tenant}'.", file=sys.stderr)
-            return 1
-    redis = Redis.from_url(settings.redis_url)
+    engine = create_async_engine(settings.database_url)
     try:
-        # Clearing needs no alias settings: those only matter to store answers.
-        removed = await ResponseCache(redis, cached_aliases={}).clear(tenant_id, alias)
+        tenant_id = None
+        if tenant is not None:
+            tenant_id = await find_tenant_id(engine, tenant)
+            if tenant_id is None:
+                print(f"Error: unknown tenant '{tenant}'.", file=sys.stderr)
+                return 1
+        redis = Redis.from_url(settings.redis_url)
+        try:
+            # Clearing needs no alias settings: those only matter to store answers.
+            removed = await ResponseCache(redis, cached_aliases={}).clear(tenant_id, alias)
+        finally:
+            await redis.aclose()
+        await record_cache_clear(engine, CLI, tenant, alias, removed)
     finally:
-        await redis.aclose()
+        await engine.dispose()
     print(f"Removed {removed} cached {'answer' if removed == 1 else 'answers'}.")
     return 0
 
@@ -211,7 +218,7 @@ async def _clear_cache(tenant: str | None, alias: str | None) -> int:
 async def _create_admin_key(name: str) -> int:
     engine = create_async_engine(Settings().database_url)
     try:
-        new_key = await create_admin_key(engine, name)
+        new_key = await create_admin_key(engine, name, actor=CLI)
     finally:
         await engine.dispose()
     print(f"Admin key for '{name}' (shown only once, store it now):")
@@ -232,7 +239,7 @@ async def _list_admin_keys() -> int:
 async def _revoke_admin_key(admin_key_id: int) -> int:
     engine = create_async_engine(Settings().database_url)
     try:
-        revocation = await revoke_admin_key(engine, admin_key_id)
+        revocation = await revoke_admin_key(engine, admin_key_id, actor=CLI)
     finally:
         await engine.dispose()
     match revocation:
