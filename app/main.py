@@ -87,7 +87,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         EmbeddingClient(embedding, http_client) if embedding is not None else None,
         max_entries_per_tenant=config.cache_max_entries_per_tenant,
     )
-    app.state.usage_log = UsageLog(database_engine)
+    app.state.usage_log = UsageLog(database_engine, prices=config.prices)
     app.state.authenticator = Authenticator(
         database_engine,
         key_prefix=KEY_PREFIX,

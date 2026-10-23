@@ -3,6 +3,13 @@
 # Limits, timeout and daily_reset belong to the model or provider, never to a route.
 # Free-tier limits below were checked on the providers' documentation on 2026-10-21.
 # They change often: check them again before relying on them.
+#
+# price: USD per million prompt (input) and completion (output) tokens. The usage
+# log records the cost of each call and what each cache hit saved. Free tiers cost
+# nothing: price: { input: 0, output: 0 }. Without a price, no cost is recorded.
+# A paid model looks like this (check prices on the provider's pricing page; this
+# one was checked on 2026-10-23):
+#   openai/gpt-oss-20b: { price: { input: 0.075, output: 0.30 } } # Groq paid plan
 
 gateway:
   deadline: 60 # seconds, for the whole request including failovers
@@ -50,8 +57,10 @@ providers:
     # responses drive the cooldown when this approximation is off.
     daily_reset: { time: "00:00", timezone: "UTC" }
     models:
-      openai/gpt-oss-120b: { rpm: 30, tpm: 8000, rpd: 1000, timeout: 30 }
-      openai/gpt-oss-20b: { rpm: 30, tpm: 8000, rpd: 1000, timeout: 30 }
+      openai/gpt-oss-120b:
+        { rpm: 30, tpm: 8000, rpd: 1000, timeout: 30, price: { input: 0, output: 0 } }
+      openai/gpt-oss-20b:
+        { rpm: 30, tpm: 8000, rpd: 1000, timeout: 30, price: { input: 0, output: 0 } }
 
   # https://ai.google.dev/gemini-api/docs/rate-limits
   gemini:
@@ -61,7 +70,7 @@ providers:
     models:
       # Google no longer publishes free-tier numbers: read the limits of your
       # project in Google AI Studio and put them here. These are conservative guesses.
-      gemini-2.5-flash: { rpm: 10, rpd: 250 }
+      gemini-2.5-flash: { rpm: 10, rpd: 250, price: { input: 0, output: 0 } }
 
   # https://openrouter.ai/docs/api/reference/limits (":free" models)
   openrouter:
@@ -70,7 +79,7 @@ providers:
     daily_reset: { time: "00:00", timezone: "UTC" }
     models:
       # 50 requests per day for the whole account (1000 after buying 10 credits).
-      "google/gemma-4-31b-it:free": { rpm: 20, rpd: 50 }
+      "google/gemma-4-31b-it:free": { rpm: 20, rpd: 50, price: { input: 0, output: 0 } }
 
   # Optional local model: docker compose --profile ollama up -d
   # Without it, this target simply fails over.
@@ -78,7 +87,7 @@ providers:
     base_url: http://ollama:11434/v1
     api_key_env: null
     models:
-      "llama3.2:3b": { timeout: 120 } # last resort, no limits
+      "llama3.2:3b": { timeout: 120, price: { input: 0, output: 0 } } # last resort, no limits
 
 routes:
   chat-fast:

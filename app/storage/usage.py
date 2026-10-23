@@ -2,12 +2,16 @@
 
 Rows are written after the response is sent, so logging never adds latency.
 The prompt itself is never stored, only its length.
+
+Costs are in USD, computed when a row is written from the real token usage and
+the model price in `gateway.yaml` (USD per million tokens).
 """
 
 import datetime as dt
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -17,6 +21,7 @@ from sqlalchemy import (
     ForeignKey,
     Identity,
     Index,
+    Numeric,
     String,
     Text,
     false,
@@ -26,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.cache.store import CachedAnswer
+from app.config import ModelPrice
 from app.routing.router import Attempt
 from app.storage.db import Base
 from app.storage.tenants import KeyOwner
@@ -85,6 +91,11 @@ class UsageLogRow(Base):
     """`hit`, `miss`, `bypass` or `unavailable` when the alias uses the cache, else NULL."""
     cache_similarity: Mapped[float | None] = mapped_column(Float)
     """For a cache hit: 1.0 for an identical request, else the similarity of the questions."""
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(16, 8))
+    """What the row cost. 0 for a cache hit; NULL when the model has no price or no
+    token counts are known (skipped targets, failed attempts, tenant quota refusals)."""
+    saved_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(16, 8))
+    """For a cache hit: what the answer would cost from its original model. Else NULL."""
 
 
 @dataclass(frozen=True)
@@ -104,8 +115,13 @@ class LoggedRequest:
 class UsageLog:
     """Writes the usage rows of each request to PostgreSQL."""
 
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(
+        self, engine: AsyncEngine, prices: Mapping[tuple[str, str], ModelPrice] | None = None
+    ) -> None:
+        """`prices` holds the price of each model by (provider, model). It prices the
+        answers of cache hits; attempts are priced by their target."""
         self._engine = engine
+        self._prices = prices or {}
 
     async def write(
         self, request: LoggedRequest, attempts: Sequence[Attempt], *, cache: str | None = None
@@ -138,6 +154,9 @@ class UsageLog:
                 "completion_tokens": attempt.completion_tokens,
                 "error_message": _cut(attempt.error_message),
                 "cache": cache,
+                "cost_usd": _cost(
+                    attempt.target.limits.price, attempt.prompt_tokens, attempt.completion_tokens
+                ),
             }
             for index, attempt in enumerate(attempts)
         ]
@@ -149,11 +168,16 @@ class UsageLog:
         """Insert the single row of a request answered from the cache.
 
         It names the target that generated the answer and the tokens it used: the
-        tokens the cache saved. `latency_ms` is the time of the cache lookup.
+        tokens the cache saved. A hit costs nothing; `saved_cost_usd` is what those
+        tokens cost at the current price of that model. `latency_ms` is the time of
+        the cache lookup.
         Like `write`, a database error is logged and never raised.
         """
         usage = answer.body.get("usage")
         usage = usage if isinstance(usage, dict) else {}
+        prompt_tokens = _int_or_none(usage.get("prompt_tokens"))
+        completion_tokens = _int_or_none(usage.get("completion_tokens"))
+        price = self._prices.get((answer.provider, answer.model))
         row = {
             **_request_columns(request),
             "provider": answer.provider,
@@ -162,10 +186,12 @@ class UsageLog:
             "outcome": CACHE_HIT,
             "status_code": 200,
             "latency_ms": latency_ms,
-            "prompt_tokens": _int_or_none(usage.get("prompt_tokens")),
-            "completion_tokens": _int_or_none(usage.get("completion_tokens")),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "cache": "hit",
             "cache_similarity": answer.similarity,
+            "cost_usd": Decimal(0),
+            "saved_cost_usd": _cost(price, prompt_tokens, completion_tokens),
         }
         await self._insert(request.request_id, [row])
 
@@ -210,6 +236,15 @@ def _request_columns(request: LoggedRequest) -> dict[str, Any]:
 def _cut(message: str | None) -> str | None:
     """Fit the column: details copied from upstream errors (code, param) have no length limit."""
     return None if message is None else message[:ERROR_MESSAGE_MAX_CHARS]
+
+
+def _cost(
+    price: ModelPrice | None, prompt_tokens: int | None, completion_tokens: int | None
+) -> Decimal | None:
+    """Cost in USD of the tokens, or None when the price or a token count is unknown."""
+    if price is None or prompt_tokens is None or completion_tokens is None:
+        return None
+    return (prompt_tokens * price.input + completion_tokens * price.output) / 1_000_000
 
 
 def _int_or_none(value: object) -> int | None:

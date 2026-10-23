@@ -10,6 +10,7 @@ import datetime as dt
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -76,13 +77,27 @@ class DailyReset(_FileModel):
         return value
 
 
+class ModelPrice(_FileModel):
+    """Price of a model, in USD per million tokens.
+
+    Decimals keep costs exact: 0.075 stays 0.075, not the nearest binary float.
+    """
+
+    input: Decimal = Field(ge=0)
+    """Price of a million prompt tokens."""
+    output: Decimal = Field(ge=0)
+    """Price of a million completion tokens."""
+
+
 class ModelConfig(_FileModel):
-    """Limits and timeout of one model. A missing limit means "no limit"."""
+    """Limits, timeout and price of one model. A missing limit means "no limit"."""
 
     rpm: int | None = Field(default=None, gt=0)
     tpm: int | None = Field(default=None, gt=0)
     rpd: int | None = Field(default=None, gt=0)
     timeout: float = Field(default=30.0, gt=0)
+    price: ModelPrice | None = None
+    """None when the price is unknown: the usage log then records no cost."""
 
 
 class ProviderConfig(_FileModel):
@@ -273,6 +288,8 @@ class GatewayConfig:
     cache_max_entries_per_tenant: int | None
     """None when there is no `cache` section, so no cache at all."""
     routes: Mapping[str, tuple[Target, ...]]
+    prices: Mapping[tuple[str, str], ModelPrice]
+    """Price of every declared model that has one, by (provider, model)."""
     enabled_providers: tuple[str, ...]
     disabled_providers: tuple[str, ...]
 
@@ -302,6 +319,7 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
             file_config.cache.max_entries_per_tenant if file_config.cache is not None else None
         ),
         routes=_resolve_routes(file_config, providers),
+        prices=_model_prices(file_config),
         enabled_providers=tuple(providers),
         disabled_providers=tuple(disabled),
     )
@@ -426,6 +444,20 @@ def _resolve_routes(
                 targets.append(Target(providers[provider_name], model, limits))
         routes[alias] = tuple(targets)
     return routes
+
+
+def _model_prices(file_config: FileConfig) -> dict[tuple[str, str], ModelPrice]:
+    """Prices by (provider, model), disabled providers included.
+
+    A cached answer may come from a provider disabled since then: what the cache
+    saved is still known.
+    """
+    return {
+        (provider_name, model): model_config.price
+        for provider_name, provider_config in file_config.providers.items()
+        for model, model_config in provider_config.models.items()
+        if model_config.price is not None
+    }
 
 
 def _split_reference(reference: str) -> tuple[str, str]:
