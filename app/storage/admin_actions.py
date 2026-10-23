@@ -2,7 +2,7 @@
 
 Every change made with the admin API or the admin CLI is recorded: keys created
 or revoked, limits set, cached answers removed, usage log purged, operator
-accounts created or recovered. A change to the
+accounts created, recovered, disabled or enabled, passwords reset or changed. A change to the
 database writes its row in the same transaction as the change itself, so the
 history never misses a change nor records one that was rolled back. Removing
 cached answers acts on Redis, which has no shared transaction with PostgreSQL:
@@ -37,6 +37,10 @@ class Action(StrEnum):
     PURGE_USAGE_LOG = "purge-usage-log"
     CREATE_OPERATOR = "create-operator"
     RECOVER_OPERATOR = "recover-operator"
+    RESET_PASSWORD = "reset-password"
+    DISABLE_OPERATOR = "disable-operator"
+    ENABLE_OPERATOR = "enable-operator"
+    CHANGE_OWN_PASSWORD = "change-own-password"
     # Admin keys were replaced by operator accounts in v0.5.1. These two values
     # are never recorded any more, but older rows of the history still hold them.
     CREATE_ADMIN_KEY = "create-admin-key"

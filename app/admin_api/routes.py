@@ -3,7 +3,7 @@ except the setup of the first account and the sign-in (`setup.py`, `sessions.py`
 
 from fastapi import APIRouter
 
-from app.admin_api.dependencies import Admin
+from app.admin_api.dependencies import SignedIn
 from app.admin_api.schemas import Health, Me
 
 router = APIRouter()
@@ -16,8 +16,11 @@ async def health() -> Health:
 
 
 @router.get("/admin/v1/me")
-async def me(admin: Admin) -> Me:
-    """Describe the operator signed in with the session of the request."""
+async def me(admin: SignedIn) -> Me:
+    """Describe the operator signed in with the session of the request.
+
+    Allowed during a forced password change: the dashboard reads it to know.
+    """
     return Me(
         username=admin.username,
         must_change_password=admin.must_change_password,

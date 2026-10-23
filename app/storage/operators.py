@@ -104,6 +104,32 @@ class NewSession:
     expires_at: dt.datetime
 
 
+@dataclass(frozen=True)
+class OperatorInfo:
+    """An operator account as the admin API lists it. Never its password hash."""
+
+    id: int
+    username: str
+    enabled: bool
+    must_change_password: bool
+    created_at: dt.datetime
+    last_sign_in_at: dt.datetime | None
+
+
+_INFO_COLUMNS = (
+    OperatorRow.id,
+    OperatorRow.username,
+    OperatorRow.enabled,
+    OperatorRow.must_change_password,
+    OperatorRow.created_at,
+    OperatorRow.last_sign_in_at,
+)
+
+
+class LastEnabledOperator(Exception):
+    """Disabling this account would leave no enabled operator: nobody could sign in."""
+
+
 async def any_operator_exists(engine: AsyncEngine) -> bool:
     """Return True when at least one operator account exists, enabled or not."""
     async with engine.connect() as connection:
@@ -239,12 +265,149 @@ async def recover_operator(
         if row is None:
             return None
         recovered_id, recovered_username = row
-        await connection.execute(
-            delete(OperatorSessionRow).where(OperatorSessionRow.operator_id == recovered_id)
-        )
+        await _close_sessions(connection, recovered_id)
         # Never the password nor its hash: the username is enough to know who was recovered.
         await record_action(connection, actor, Action.RECOVER_OPERATOR, recovered_username, {})
         return str(recovered_username)
+
+
+async def list_operators(engine: AsyncEngine) -> list[OperatorInfo]:
+    """Return every operator account, enabled or not, in alphabetical order."""
+    query = select(*_INFO_COLUMNS).order_by(func.lower(OperatorRow.username))
+    async with engine.connect() as connection:
+        rows = (await connection.execute(query)).all()
+    return [OperatorInfo(*row) for row in rows]
+
+
+async def find_operator(engine: AsyncEngine, operator_id: int) -> OperatorInfo | None:
+    """Return the operator account `operator_id`, or None when there is none."""
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(select(*_INFO_COLUMNS).where(OperatorRow.id == operator_id))
+        ).first()
+    return None if row is None else OperatorInfo(*row)
+
+
+async def find_password_hash(engine: AsyncEngine, operator_id: int) -> str | None:
+    """Return the password hash of the operator `operator_id`, or None when there is none."""
+    async with engine.connect() as connection:
+        found = await connection.scalar(
+            select(OperatorRow.password_hash).where(OperatorRow.id == operator_id)
+        )
+    return None if found is None else str(found)
+
+
+async def reset_password(
+    engine: AsyncEngine, operator_id: int, password_hash: str, *, actor: Actor
+) -> OperatorInfo | None:
+    """Give an operator a new password set by another operator, and record the action.
+
+    The operator must change it at the next sign-in, and all its sessions are
+    closed at once. Returns None, and changes nothing, when the account does not exist.
+    """
+    async with engine.begin() as connection:
+        operator = await _update_operator(
+            connection, operator_id, password_hash=password_hash, must_change_password=True
+        )
+        if operator is None:
+            return None
+        await _close_sessions(connection, operator_id)
+        await record_action(connection, actor, Action.RESET_PASSWORD, operator.username, {})
+        return operator
+
+
+async def disable_operator(
+    engine: AsyncEngine, operator_id: int, *, actor: Actor
+) -> OperatorInfo | None:
+    """Disable an operator account, close all its sessions and record the action.
+
+    Returns None, and changes nothing, when the account does not exist. Raises
+    `LastEnabledOperator`, and changes nothing, when no other enabled account
+    would remain. The check and the change are atomic: the table is locked
+    against every other write until the transaction ends, so two operators who
+    disable each other at the same time can never leave zero enabled accounts.
+    """
+    async with engine.begin() as connection:
+        # SHARE ROW EXCLUSIVE conflicts with itself and with every insert, update
+        # and delete. It is released at the end of the transaction.
+        await connection.execute(text("LOCK TABLE operators IN SHARE ROW EXCLUSIVE MODE"))
+        operator = await _update_operator(connection, operator_id, enabled=False)
+        if operator is None:
+            return None
+        if not await connection.scalar(select(exists().where(OperatorRow.enabled))):
+            raise LastEnabledOperator  # leaving the block rolls the change back
+        await _close_sessions(connection, operator_id)
+        await record_action(connection, actor, Action.DISABLE_OPERATOR, operator.username, {})
+        return operator
+
+
+async def enable_operator(
+    engine: AsyncEngine, operator_id: int, *, actor: Actor
+) -> OperatorInfo | None:
+    """Enable an operator account again and record the action.
+
+    Returns None, and changes nothing, when the account does not exist.
+    """
+    async with engine.begin() as connection:
+        operator = await _update_operator(connection, operator_id, enabled=True)
+        if operator is not None:
+            await record_action(connection, actor, Action.ENABLE_OPERATOR, operator.username, {})
+        return operator
+
+
+async def change_own_password(
+    engine: AsyncEngine, operator: OperatorIdentity, password_hash: str
+) -> None:
+    """Change the password of the operator signed in, and record the action.
+
+    The forced change, if any, is done. The other sessions of the operator are
+    closed; the session of the request stays open.
+    """
+    async with engine.begin() as connection:
+        await _update_operator(
+            connection,
+            operator.operator_id,
+            password_hash=password_hash,
+            must_change_password=False,
+        )
+        await connection.execute(
+            delete(OperatorSessionRow).where(
+                OperatorSessionRow.operator_id == operator.operator_id,
+                OperatorSessionRow.id != operator.session_id,
+            )
+        )
+        actor = Actor(operator.username, operator.operator_id)
+        await record_action(connection, actor, Action.CHANGE_OWN_PASSWORD, operator.username, {})
+
+
+async def set_language(engine: AsyncEngine, operator_id: int, language: str | None) -> None:
+    """Store the language of the dashboard chosen by an operator. None: the browser's language.
+
+    A preference, not an admin action: it is not recorded in the history.
+    """
+    async with engine.begin() as connection:
+        await _update_operator(connection, operator_id, language=language)
+
+
+async def _update_operator(
+    connection: AsyncConnection, operator_id: int, **values: object
+) -> OperatorInfo | None:
+    row = (
+        await connection.execute(
+            update(OperatorRow)
+            .where(OperatorRow.id == operator_id)
+            .values(**values)
+            .returning(*_INFO_COLUMNS)
+        )
+    ).first()
+    return None if row is None else OperatorInfo(*row)
+
+
+async def _close_sessions(connection: AsyncConnection, operator_id: int) -> None:
+    """Delete every session of an operator: their tokens are refused from now on."""
+    await connection.execute(
+        delete(OperatorSessionRow).where(OperatorSessionRow.operator_id == operator_id)
+    )
 
 
 async def _insert_operator(

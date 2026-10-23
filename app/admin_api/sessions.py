@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.admin_api.dependencies import Admin, Database
+from app.admin_api.dependencies import Database, SignedIn
 from app.admin_api.schemas import Session
 from app.api.routes import error_response
 from app.auth import passwords
@@ -64,8 +64,11 @@ async def sign_in(
 
 
 @router.delete("/sessions/current", status_code=204)
-async def sign_out(admin: Admin, database: Database) -> Response:
-    """End the session of the request: its token is refused from now on."""
+async def sign_out(admin: SignedIn, database: Database) -> Response:
+    """End the session of the request: its token is refused from now on.
+
+    Allowed during a forced password change.
+    """
     await close_session(database, admin.session_id)
     return Response(status_code=204)
 

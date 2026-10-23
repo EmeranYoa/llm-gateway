@@ -71,6 +71,27 @@ def _log_refused(client_ip: str, reason: str) -> None:
     logger.warning("refused an admin request from %s: %s", client_ip, reason)
 
 
-Admin = Annotated[OperatorIdentity, Depends(authenticate_operator)]
-"""The operator signed in on the request. Every route under `/admin/v1` needs one,
-except the setup of the first account and the sign-in."""
+SignedIn = Annotated[OperatorIdentity, Depends(authenticate_operator)]
+"""The operator signed in on the request, even one who must change their password
+first. Only the routes that such an operator still needs use it: `GET /me`, the
+change of their own password and language, and the sign-out."""
+
+
+class PasswordChangeRequired(Exception):
+    """The operator must choose a new password before doing anything else."""
+
+
+async def require_password_changed(operator: SignedIn) -> OperatorIdentity:
+    """Refuse an operator who must change their password: a new account, or a reset one.
+
+    Raises `PasswordChangeRequired` (403) until they change it.
+    """
+    if operator.must_change_password:
+        raise PasswordChangeRequired
+    return operator
+
+
+Admin = Annotated[OperatorIdentity, Depends(require_password_changed)]
+"""The operator signed in on the request, with no password change pending. Every
+route under `/admin/v1` needs one, except the setup of the first account, the
+sign-in, and the routes that use `SignedIn`."""

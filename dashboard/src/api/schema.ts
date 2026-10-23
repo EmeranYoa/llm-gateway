@@ -98,10 +98,143 @@ export interface paths {
         /**
          * Me
          * @description Describe the operator signed in with the session of the request.
+         *
+         *     Allowed during a forced password change: the dashboard reads it to know.
          */
         get: operations["me_admin_v1_me_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/me/language": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Change Language
+         * @description Choose the language of the dashboard. No password needed: it is only a preference.
+         */
+        put: operations["change_language_admin_v1_me_language_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/me/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Change Password
+         * @description Change one's own password. Allowed, and needed, during a forced password change.
+         *
+         *     The other sessions of the operator are closed; this one stays open.
+         */
+        put: operations["change_password_admin_v1_me_password_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/operators": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Accounts
+         * @description Return every operator account, enabled or not.
+         */
+        get: operations["list_accounts_admin_v1_operators_get"];
+        put?: never;
+        /**
+         * Create Account
+         * @description Create an operator account. Its owner must change the password at the first sign-in.
+         */
+        post: operations["create_account_admin_v1_operators_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/operators/{operator_id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable Account
+         * @description Disable an operator account and close all its sessions at once.
+         *
+         *     One cannot disable oneself, nor the last enabled account.
+         */
+        post: operations["disable_account_admin_v1_operators__operator_id__disable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/operators/{operator_id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enable Account
+         * @description Enable an operator account again: it can sign in with its password.
+         */
+        post: operations["enable_account_admin_v1_operators__operator_id__enable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/operators/{operator_id}/reset-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset Account Password
+         * @description Give another operator a new password, and close all their sessions at once.
+         *
+         *     They must change it at the next sign-in. To change one's own password, use
+         *     `PUT /admin/v1/me/password` instead.
+         */
+        post: operations["reset_account_password_admin_v1_operators__operator_id__reset_password_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -234,6 +367,8 @@ export interface paths {
         /**
          * Sign Out
          * @description End the session of the request: its token is refused from now on.
+         *
+         *     Allowed during a forced password change.
          */
         delete: operations["sign_out_admin_v1_sessions_current_delete"];
         options?: never;
@@ -396,7 +531,7 @@ export interface components {
          * @description What an operator did.
          * @enum {string}
          */
-        Action: "create-key" | "revoke-key" | "set-limits" | "clear-cache" | "purge-usage-log" | "create-operator" | "recover-operator" | "create-admin-key" | "revoke-admin-key";
+        Action: "create-key" | "revoke-key" | "set-limits" | "clear-cache" | "purge-usage-log" | "create-operator" | "recover-operator" | "reset-password" | "disable-operator" | "enable-operator" | "change-own-password" | "create-admin-key" | "revoke-admin-key";
         /**
          * AdminAction
          * @description A change made by an operator, with the admin API or the admin CLI.
@@ -562,6 +697,14 @@ export interface components {
             status: string;
         };
         /**
+         * LanguageChoice
+         * @description Choose the language of the dashboard.
+         */
+        LanguageChoice: {
+            /** Language */
+            language: ("en" | "fr") | null;
+        };
+        /**
          * LatencyMedian
          * @description Median of a duration, in milliseconds. Null when nothing was measured.
          */
@@ -629,6 +772,47 @@ export interface components {
             tenant: string;
             /** Tokens Per Day */
             tokens_per_day?: number | null;
+        };
+        /**
+         * NewOperatorRequest
+         * @description Create an operator account. Its owner must change the password at the first sign-in.
+         */
+        NewOperatorRequest: {
+            /** Current Password */
+            current_password: string;
+            /** Password */
+            password: string;
+            /** Username */
+            username: string;
+        };
+        /**
+         * Operator
+         * @description An operator account. Never its password nor its hash.
+         */
+        Operator: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Id */
+            id: number;
+            /** Last Sign In At */
+            last_sign_in_at: string | null;
+            /** Must Change Password */
+            must_change_password: boolean;
+            /** Username */
+            username: string;
+        };
+        /**
+         * Operators
+         * @description Every operator account, in alphabetical order.
+         */
+        Operators: {
+            /** Operators */
+            operators: components["schemas"]["Operator"][];
         };
         /**
          * Overview
@@ -729,6 +913,26 @@ export interface components {
             unpriced_requests: number;
         };
         /**
+         * OwnPasswordChange
+         * @description Change one's own password.
+         */
+        OwnPasswordChange: {
+            /** Current Password */
+            current_password: string;
+            /** New Password */
+            new_password: string;
+        };
+        /**
+         * PasswordResetRequest
+         * @description Give another operator a new password, which they must change at the next sign-in.
+         */
+        PasswordResetRequest: {
+            /** Current Password */
+            current_password: string;
+            /** Password */
+            password: string;
+        };
+        /**
          * Period
          * @description How far back a report goes. 30 days at most: older rows may be purged.
          * @enum {string}
@@ -749,6 +953,14 @@ export interface components {
              * @description Used in the current window. Only counted when the limit is set. Null when the live state is unknown.
              */
             used: number | null;
+        };
+        /**
+         * Reauthentication
+         * @description Confirm an action on accounts with the current password of the operator.
+         */
+        Reauthentication: {
+            /** Current Password */
+            current_password: string;
         };
         /**
          * RecoveredOperator
@@ -1502,6 +1714,370 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Me"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    change_language_admin_v1_me_language_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LanguageChoice"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Me"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    change_password_admin_v1_me_password_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OwnPasswordChange"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Me"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_accounts_admin_v1_operators_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operators"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_account_admin_v1_operators_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewOperatorRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operator"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disable_account_admin_v1_operators__operator_id__disable_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                operator_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Reauthentication"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operator"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    enable_account_admin_v1_operators__operator_id__enable_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                operator_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Reauthentication"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operator"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reset_account_password_admin_v1_operators__operator_id__reset_password_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                operator_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordResetRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operator"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description Validation Error */

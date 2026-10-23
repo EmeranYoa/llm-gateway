@@ -25,7 +25,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.admin_api import actions, recovery, requests, sessions, setup, statistics, targets
+from app.admin_api import (
+    actions,
+    operators,
+    recovery,
+    requests,
+    sessions,
+    setup,
+    statistics,
+    targets,
+)
+from app.admin_api.dependencies import PasswordChangeRequired
 from app.admin_api.one_time_tokens import OneTimeToken
 from app.admin_api.recovery import RecoveryMode, announce_recovery_token
 from app.admin_api.routes import router
@@ -72,6 +82,7 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(InvalidSession, invalid_session_handler)
     app.add_exception_handler(AuthenticationUnavailable, authentication_unavailable_handler)
+    app.add_exception_handler(PasswordChangeRequired, password_change_required_handler)
     app.add_exception_handler(SQLAlchemyError, database_unavailable_handler)
     app.add_exception_handler(OSError, database_unavailable_handler)
     app.include_router(router)
@@ -82,6 +93,7 @@ def create_admin_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(targets.router)
     app.include_router(requests.router)
     app.include_router(actions.router)
+    app.include_router(operators.router)
     return app
 
 
@@ -92,6 +104,16 @@ async def invalid_session_handler(_: Request, __: Exception) -> JSONResponse:
         "Missing, invalid or expired session. Sign in again.",
         "invalid_request_error",
         code="invalid_session",
+    )
+
+
+async def password_change_required_handler(_: Request, __: Exception) -> JSONResponse:
+    """Refuse every other request until the operator chooses a new password (403)."""
+    return error_response(
+        403,
+        "Change your password first: PUT /admin/v1/me/password.",
+        "invalid_request_error",
+        code="password_change_required",
     )
 
 
