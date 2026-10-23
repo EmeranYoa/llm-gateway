@@ -13,6 +13,7 @@ answer of identical concurrent requests and the entry limit of each tenant.
 
 import hashlib
 import json
+import logging
 import re
 import struct
 import time
@@ -23,12 +24,18 @@ from pathlib import Path
 from typing import Any, cast
 
 from redis.asyncio import Redis
-from redis.exceptions import ResponseError
+from redis.exceptions import RedisError, ResponseError
 from redis.typing import EncodableT, FieldT
 
-from app.cache.embeddings import EmbeddingClient
+from app.cache.embeddings import EmbeddingClient, EmbeddingUnavailable
 from app.cache.keys import RequestKey
 from app.config import AliasCache, Target
+
+logger = logging.getLogger(__name__)
+
+
+class CacheUnavailable(Exception):
+    """Redis or the embedding model failed: the request goes on without the cache."""
 
 
 @dataclass(frozen=True)
@@ -85,26 +92,33 @@ class ResponseCache:
         """Look for the answer of an identical request of the tenant, then of a similar one.
 
         The semantic search runs only for a user question of at most the configured
-        number of characters. Raises `EmbeddingUnavailable` when the embedding model fails.
+        number of characters. Raises `CacheUnavailable` when Redis or the embedding
+        model fails.
         """
-        answer = await self._read(_entry_key(tenant_id, alias, key), similarity=1.0)
-        if answer is not None:
-            return CacheLookup(answer, vector=None)
-        vector = await self.vector_for(key)
-        if vector is None:
-            return CacheLookup(None, vector=None)
-        return CacheLookup(await self._nearest(tenant_id, alias, key, vector), vector)
+        try:
+            answer = await self._read(_entry_key(tenant_id, alias, key), similarity=1.0)
+            if answer is not None:
+                return CacheLookup(answer, vector=None)
+            vector = await self.vector_for(key)
+            if vector is None:
+                return CacheLookup(None, vector=None)
+            return CacheLookup(await self._nearest(tenant_id, alias, key, vector), vector)
+        except RedisError as error:
+            raise CacheUnavailable(f"Redis failed ({type(error).__name__})") from error
 
     async def vector_for(self, key: RequestKey) -> list[float] | None:
         """The embedding of the question of `key`, or None when it is not compared by meaning.
 
         A bypass skips the lookup but still needs it: the fresh answer it stores
-        must answer similar questions too. Raises `EmbeddingUnavailable`.
+        must answer similar questions too. Raises `CacheUnavailable`.
         """
         if self._embedding is None or not self._embeds(key.question):
             return None
         assert key.question is not None  # checked by `_embeds`
-        return await self._embedding.embed(key.question)
+        try:
+            return await self._embedding.embed(key.question)
+        except EmbeddingUnavailable as error:
+            raise CacheUnavailable(str(error)) from error
 
     async def store(
         self,
@@ -122,7 +136,35 @@ class ResponseCache:
         With the `vector` of the question, the entry can also answer similar questions.
         Nothing is written when an answer to the same request is already stored
         (unless `replace`), or when the tenant has its maximum number of entries.
+
+        It runs after the response, so a Redis error is logged, never raised.
         """
+        try:
+            await self._write(tenant_id, alias, key, body, target, vector, replace=replace)
+        except ResponseError as error:
+            if "db != 0" not in str(error):
+                raise
+            logger.error(
+                "the semantic cache needs Redis database 0 (Redis creates vector indexes "
+                "there only): set REDIS_URL to end with /0"
+            )
+        except RedisError as error:
+            logger.warning(
+                "Redis is unavailable (%s): an answer was not stored in the cache",
+                type(error).__name__,
+            )
+
+    async def _write(
+        self,
+        tenant_id: int,
+        alias: str,
+        key: RequestKey,
+        body: Mapping[str, Any],
+        target: Target,
+        vector: list[float] | None,
+        *,
+        replace: bool,
+    ) -> None:
         entry_key = _entry_key(tenant_id, alias, key)
         entry: dict[FieldT, EncodableT] = {
             "body": json.dumps(body, separators=(",", ":")),

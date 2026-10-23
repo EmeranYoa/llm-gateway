@@ -4,7 +4,9 @@ import asyncio
 import contextlib
 import datetime as dt
 import json
+import logging
 import math
+import time
 from collections.abc import AsyncIterator, Coroutine
 from typing import Annotated, Any, cast
 from uuid import uuid4
@@ -17,7 +19,7 @@ from app.auth.authenticator import Authenticator
 from app.cache.eligibility import answer_can_be_stored, request_can_use_cache
 from app.cache.keys import RequestKey, request_key
 from app.cache.replay import replayed_chunks
-from app.cache.store import CachedAnswer, CacheLookup, ResponseCache
+from app.cache.store import CachedAnswer, CacheLookup, CacheUnavailable, ResponseCache
 from app.config import GatewayConfig, Target
 from app.routing.acquisition import (
     TargetGate,
@@ -43,6 +45,8 @@ from app.routing.streaming import CommittedStream, StreamInterrupted
 from app.schemas import ChatCompletionRequest, ErrorBody, ErrorDetail, asks_for_stream_usage
 from app.storage.tenants import KeyOwner
 from app.storage.usage import UsageLog
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -182,6 +186,8 @@ async def chat_completions(
     """
     request_id = uuid4().hex
     received_at = dt.datetime.now(dt.UTC)
+    # The deadline covers everything after authentication, the cache lookup included.
+    started = time.monotonic()
     try:
         admission = await tenant_gate.acquire(
             owner.tenant_id, owner.limits, request.model_dump(exclude_unset=True)
@@ -213,18 +219,23 @@ async def chat_completions(
         attempts=attempts,
     )
     cache_key = _cache_key(response_cache, request)
-    bypass = cache_key is not None and (x_gateway_cache or "").strip().lower() == "bypass"
-    cache_lookup = None
-    if bypass and cache_key is not None:
-        # The client wants a fresh answer: no lookup, but the vector is needed to store it.
-        cache_lookup = CacheLookup(None, await response_cache.vector_for(cache_key))
-    elif cache_key is not None:
-        cache_lookup = await response_cache.lookup(owner.tenant_id, request.model, cache_key)
+    cache_status, cache_lookup = None, CacheLookup(None, vector=None)
+    if cache_key is not None:
+        cache_status, cache_lookup = await _consult_cache(
+            response_cache,
+            owner.tenant_id,
+            request.model,
+            cache_key,
+            bypass=(x_gateway_cache or "").strip().lower() == "bypass",
+            redis_down=admission.degraded,
+        )
         if cache_lookup.answer is not None:
             # No provider is called: the tenant budget gets its reserved tokens back.
             await tenant_gate.release(admission)
             return _cached_response(cache_lookup.answer, request, request_id)
-    routing = _route(gateway_router, request, attempts, redis_down=admission.degraded)
+    routing = _route(
+        gateway_router, request, attempts, redis_down=admission.degraded, started=started
+    )
     try:
         # A streamed request may wait long for its first content: stop if the client leaves.
         result = (
@@ -235,10 +246,11 @@ async def chat_completions(
         return Response(status_code=CLIENT_CLOSED_REQUEST)
     if not isinstance(result, CommittedStream):
         await _record_tenant_outcome(tenant_gate, admission, result, attempts)
-    cache_headers = {"X-Gateway-Cache": "bypass" if bypass else "miss"} if cache_key else {}
-    if cache_key is not None:
+    cache_headers = {"X-Gateway-Cache": cache_status} if cache_status is not None else {}
+    if cache_key is not None and cache_status in ("miss", "bypass"):
         # Stored after the response: the client does not wait for the cache.
-        vector = cache_lookup.vector if cache_lookup is not None else None
+        vector = cache_lookup.vector
+        bypass = cache_status == "bypass"
         if isinstance(result, RoutedResponse) and answer_can_be_stored(result.body):
             background_tasks.add_task(
                 response_cache.store,
@@ -291,6 +303,35 @@ def _cache_key(response_cache: ResponseCache, request: ChatCompletionRequest) ->
     if not request_can_use_cache(body):
         return None
     return request_key(body)
+
+
+async def _consult_cache(
+    response_cache: ResponseCache,
+    tenant_id: int,
+    alias: str,
+    key: RequestKey,
+    *,
+    bypass: bool,
+    redis_down: bool,
+) -> tuple[str, CacheLookup]:
+    """Look the request up in the cache. Returns the `X-Gateway-Cache` status and the result.
+
+    The status is `hit`, `miss`, `bypass` (the client wants a fresh answer: no
+    lookup), or `unavailable` (Redis or the embedding model failed). The cache never
+    makes a request fail: when it is unavailable, the request is routed without it.
+    """
+    if redis_down:
+        # Degraded mode (ADR 0002): Redis failed for this request, do not wait for it again.
+        return "unavailable", CacheLookup(None, vector=None)
+    try:
+        if bypass:
+            # No lookup, but the fresh answer needs the vector of its question to be stored.
+            return "bypass", CacheLookup(None, await response_cache.vector_for(key))
+        lookup = await response_cache.lookup(tenant_id, alias, key)
+    except CacheUnavailable as error:
+        logger.warning("the response cache is unavailable (%s): routing without it", error)
+        return "unavailable", CacheLookup(None, vector=None)
+    return ("hit" if lookup.answer is not None else "miss"), lookup
 
 
 def _cached_response(
@@ -464,6 +505,7 @@ async def _route(
     attempts: list[Attempt],
     *,
     redis_down: bool,
+    started: float,
 ) -> RoutedResponse | CommittedStream | JSONResponse:
     """Route the request, or build the OpenAI error response that explains why it failed."""
     route = gateway_router.route_stream if request.stream else gateway_router.route
@@ -473,6 +515,7 @@ async def _route(
             request.model_dump(exclude_unset=True),
             attempts=attempts,
             redis_down=redis_down,
+            started=started,
         )
     except UnknownAlias as exc:
         return error_response(

@@ -266,6 +266,7 @@ class Router:
         *,
         attempts: list[Attempt],
         redis_down: bool = False,
+        started: float | None = None,
     ) -> RoutedResponse:
         """Send the request to the targets of `alias` in order, until one answers.
 
@@ -288,6 +289,9 @@ class Router:
 
         `redis_down` tells that Redis already failed for this request (during
         the tenant quota check): targets are then called without waiting for it.
+
+        `started` is when the request started (`time.monotonic()`), so that work done
+        before routing (the cache lookup) counts in the deadline. Now by default.
 
         Raises:
             UnknownAlias: the alias is not defined.
@@ -315,7 +319,7 @@ class Router:
             )
 
         return await self._try_targets(
-            alias, body, attempts=attempts, redis_down=redis_down, answer=answer
+            alias, body, attempts=attempts, redis_down=redis_down, started=started, answer=answer
         )
 
     async def route_stream(
@@ -325,6 +329,7 @@ class Router:
         *,
         attempts: list[Attempt],
         redis_down: bool = False,
+        started: float | None = None,
     ) -> CommittedStream:
         """Like `route`, for a streamed answer: fail over until a target sends content.
 
@@ -408,7 +413,7 @@ class Router:
             )
 
         return await self._try_targets(
-            alias, body, attempts=attempts, redis_down=redis_down, answer=answer
+            alias, body, attempts=attempts, redis_down=redis_down, started=started, answer=answer
         )
 
     async def _try_targets[T](
@@ -418,6 +423,7 @@ class Router:
         *,
         attempts: list[Attempt],
         redis_down: bool,
+        started: float | None,
         answer: Callable[["_Call"], Awaitable[T]],
     ) -> T:
         """The failover loop shared by `route` and `route_stream`.
@@ -431,7 +437,7 @@ class Router:
             raise UnknownAlias(alias)
         if not targets:
             raise NoEnabledTarget(alias)
-        deadline_at = time.monotonic() + self._deadline
+        deadline_at = (started if started is not None else time.monotonic()) + self._deadline
         prompt_tokens = estimate_prompt_tokens(body)
         failures: list[tuple[Target, ProviderError | Refusal]] = []
         waits: list[float] = []

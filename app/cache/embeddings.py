@@ -6,6 +6,7 @@ exist to fail over between targets, and the cache never fails over to another
 embedding model, whose vectors would not be comparable.
 """
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -32,21 +33,26 @@ class EmbeddingClient:
         return self._settings.max_chars
 
     async def embed(self, text: str) -> list[float]:
-        """Return the vector of `text`, or raise `EmbeddingUnavailable`."""
+        """Return the vector of `text`, or raise `EmbeddingUnavailable`.
+
+        The timeout is also enforced here, so a slow model can never hold a request
+        longer than `timeout`, whatever the HTTP client does.
+        """
         provider = self._settings.provider
         headers = {}
         if provider.api_key is not None:
             headers["Authorization"] = f"Bearer {provider.api_key.get_secret_value()}"
         try:
-            response = await self._http_client.post(
-                f"{provider.base_url}/embeddings",
-                json={"model": self._settings.model, "input": text},
-                headers=headers,
-                timeout=self._settings.timeout,
-            )
+            async with asyncio.timeout(self._settings.timeout):
+                response = await self._http_client.post(
+                    f"{provider.base_url}/embeddings",
+                    json={"model": self._settings.model, "input": text},
+                    headers=headers,
+                    timeout=self._settings.timeout,
+                )
             response.raise_for_status()
             return _vector(response.json())
-        except (httpx.HTTPError, ValueError) as error:
+        except (httpx.HTTPError, ValueError, TimeoutError) as error:
             raise EmbeddingUnavailable(
                 f"embedding model {self._settings.model} failed ({type(error).__name__})"
             ) from error
