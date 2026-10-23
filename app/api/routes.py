@@ -44,7 +44,7 @@ from app.routing.router import (
 from app.routing.streaming import CommittedStream, StreamInterrupted
 from app.schemas import ChatCompletionRequest, ErrorBody, ErrorDetail, asks_for_stream_usage
 from app.storage.tenants import KeyOwner
-from app.storage.usage import UsageLog
+from app.storage.usage import LoggedRequest, UsageLog
 
 logger = logging.getLogger(__name__)
 
@@ -188,39 +188,27 @@ async def chat_completions(
     received_at = dt.datetime.now(dt.UTC)
     # The deadline covers everything after authentication, the cache lookup included.
     started = time.monotonic()
-    try:
-        admission = await tenant_gate.acquire(
-            owner.tenant_id, owner.limits, request.model_dump(exclude_unset=True)
-        )
-    except TenantQuotaExceeded as exc:
-        background_tasks.add_task(
-            usage_log.write_tenant_rejection,
-            request_id=request_id,
-            received_at=received_at,
-            owner=owner,
-            alias=request.model,
-            prompt_chars=request.prompt_chars(),
-            stream=request.stream,
-            reason=str(exc),
-        )
-        refused = _tenant_quota_response(exc)
-        refused.headers["X-Gateway-Request-Id"] = request_id
-        return refused
-    attempts: list[Attempt] = []
-    # Written after the response, with every attempt the routing appends below.
-    background_tasks.add_task(
-        usage_log.write,
+    logged_request = LoggedRequest(
         request_id=request_id,
         received_at=received_at,
         owner=owner,
         alias=request.model,
         prompt_chars=request.prompt_chars(),
         stream=request.stream,
-        attempts=attempts,
     )
+    try:
+        admission = await tenant_gate.acquire(
+            owner.tenant_id, owner.limits, request.model_dump(exclude_unset=True)
+        )
+    except TenantQuotaExceeded as exc:
+        background_tasks.add_task(usage_log.write_tenant_rejection, logged_request, str(exc))
+        refused = _tenant_quota_response(exc)
+        refused.headers["X-Gateway-Request-Id"] = request_id
+        return refused
     cache_key = _cache_key(response_cache, request)
     cache_status, cache_lookup = None, CacheLookup(None, vector=None)
     if cache_key is not None:
+        lookup_started = time.perf_counter()
         cache_status, cache_lookup = await _consult_cache(
             response_cache,
             owner.tenant_id,
@@ -232,7 +220,16 @@ async def chat_completions(
         if cache_lookup.answer is not None:
             # No provider is called: the tenant budget gets its reserved tokens back.
             await tenant_gate.release(admission)
+            background_tasks.add_task(
+                usage_log.write_cache_hit,
+                logged_request,
+                cache_lookup.answer,
+                latency_ms=round((time.perf_counter() - lookup_started) * 1000),
+            )
             return _cached_response(cache_lookup.answer, request, request_id)
+    attempts: list[Attempt] = []
+    # Written after the response, with every attempt the routing appends below.
+    background_tasks.add_task(usage_log.write, logged_request, attempts, cache=cache_status)
     routing = _route(
         gateway_router, request, attempts, redis_down=admission.degraded, started=started
     )
