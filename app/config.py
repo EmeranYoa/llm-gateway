@@ -163,9 +163,24 @@ class TenantsSection(_FileModel):
     """Limits of every tenant that has no limits of its own (set with `set-limits`)."""
 
 
+class CachedAliasSection(_FileModel):
+    """Cache settings of one alias. A missing value falls back to the `cache` section."""
+
+    ttl: float | None = Field(default=None, gt=0)
+
+
+class CacheSection(_FileModel):
+    """The response cache. Only the aliases listed in `aliases` use it."""
+
+    ttl: float = Field(default=86400.0, gt=0)
+    """Seconds a stored answer is kept. A hit does not extend it."""
+    aliases: dict[str, CachedAliasSection]
+
+
 class FileConfig(_FileModel):
     gateway: GatewaySection = GatewaySection()
     tenants: TenantsSection = TenantsSection()
+    cache: CacheSection | None = None
     providers: dict[str, ProviderConfig]
     routes: dict[str, list[str]]
 
@@ -195,6 +210,14 @@ class Target:
 
 
 @dataclass(frozen=True)
+class AliasCache:
+    """How the response cache works for one cached alias."""
+
+    ttl: float
+    """Seconds a stored answer is kept."""
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     deadline: float
     """Maximum time in seconds for a whole request, failovers included."""
@@ -205,6 +228,8 @@ class GatewayConfig:
     breaker: BreakerSection
     stream: StreamSection
     tenant_default_limits: TenantLimits
+    cached_aliases: Mapping[str, AliasCache]
+    """The aliases that use the response cache. Empty when there is no `cache` section."""
     routes: Mapping[str, tuple[Target, ...]]
     enabled_providers: tuple[str, ...]
     disabled_providers: tuple[str, ...]
@@ -218,6 +243,7 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
     """
     file_config = _read_file(path)
     _check_route_references(file_config)
+    _check_cached_aliases(file_config)
     providers, disabled = _resolve_providers(file_config, environ)
 
     return GatewayConfig(
@@ -228,6 +254,7 @@ def load_config(path: Path, environ: Mapping[str, str]) -> GatewayConfig:
         breaker=file_config.gateway.breaker,
         stream=file_config.gateway.stream,
         tenant_default_limits=file_config.tenants.default_limits,
+        cached_aliases=_resolve_cached_aliases(file_config.cache),
         routes=_resolve_routes(file_config, providers),
         enabled_providers=tuple(providers),
         disabled_providers=tuple(disabled),
@@ -261,6 +288,24 @@ def _check_route_references(file_config: FileConfig) -> None:
                 )
     if errors:
         raise ConfigError("\n".join(errors))
+
+
+def _check_cached_aliases(file_config: FileConfig) -> None:
+    """Fail when the cache section names an alias that is not a route."""
+    if file_config.cache is None:
+        return
+    unknown = [alias for alias in file_config.cache.aliases if alias not in file_config.routes]
+    if unknown:
+        raise ConfigError(f"the cache section names unknown aliases: {', '.join(unknown)}")
+
+
+def _resolve_cached_aliases(cache: CacheSection | None) -> dict[str, AliasCache]:
+    if cache is None:
+        return {}
+    return {
+        alias: AliasCache(ttl=settings.ttl if settings.ttl is not None else cache.ttl)
+        for alias, settings in cache.aliases.items()
+    }
 
 
 def _resolve_providers(

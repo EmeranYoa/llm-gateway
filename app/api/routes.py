@@ -14,6 +14,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.auth.authenticator import Authenticator
+from app.cache.keys import RequestKey, request_key
+from app.cache.store import CachedAnswer, ResponseCache
 from app.config import GatewayConfig, Target
 from app.routing.acquisition import (
     TargetGate,
@@ -76,6 +78,11 @@ async def authenticate(
     """Check the gateway API key of the request (`Authorization: Bearer <key>`)."""
     client_ip = request.client.host if request.client else "unknown address"
     return await authenticator.authenticate(authorization, client_ip)
+
+
+def get_response_cache(request: Request) -> ResponseCache:
+    """Return the response cache built at startup."""
+    return cast(ResponseCache, request.app.state.response_cache)
 
 
 def get_usage_log(request: Request) -> UsageLog:
@@ -151,6 +158,7 @@ async def chat_completions(
     owner: Annotated[KeyOwner, Depends(authenticate)],
     tenant_gate: Annotated[TenantGate, Depends(get_tenant_gate)],
     gateway_router: Annotated[Router, Depends(get_router)],
+    response_cache: Annotated[ResponseCache, Depends(get_response_cache)],
     usage_log: Annotated[UsageLog, Depends(get_usage_log)],
 ) -> dict[str, Any] | Response:
     """Route an OpenAI chat completion request to a provider/model target.
@@ -162,6 +170,10 @@ async def chat_completions(
 
     With `stream: true`, the answer is a Server-Sent Events stream in OpenAI
     format, sent once a target has produced its first content (the commit point).
+
+    On an alias that uses the response cache, an identical earlier request of the
+    same tenant is answered from the cache, without calling any provider. Otherwise
+    the complete answer is stored after the response.
     """
     request_id = uuid4().hex
     received_at = dt.datetime.now(dt.UTC)
@@ -195,6 +207,13 @@ async def chat_completions(
         stream=request.stream,
         attempts=attempts,
     )
+    cache_key = _cache_key(response_cache, request)
+    if cache_key is not None:
+        cached = await response_cache.lookup(owner.tenant_id, request.model, cache_key)
+        if cached is not None:
+            # No provider is called: the tenant budget gets its reserved tokens back.
+            await tenant_gate.release(admission)
+            return _cached_response(cached, request_id)
     routing = _route(gateway_router, request, attempts, redis_down=admission.degraded)
     try:
         # A streamed request may wait long for its first content: stop if the client leaves.
@@ -206,6 +225,19 @@ async def chat_completions(
         return Response(status_code=CLIENT_CLOSED_REQUEST)
     if not isinstance(result, CommittedStream):
         await _record_tenant_outcome(tenant_gate, admission, result, attempts)
+    if cache_key is not None:
+        if isinstance(result, RoutedResponse):
+            # Stored after the response: the client does not wait for the cache.
+            background_tasks.add_task(
+                response_cache.store,
+                owner.tenant_id,
+                request.model,
+                cache_key,
+                result.body,
+                result.target,
+            )
+        headers = result.headers if isinstance(result, JSONResponse) else response.headers
+        headers["X-Gateway-Cache"] = "miss"
     if isinstance(result, JSONResponse):
         result.headers["X-Gateway-Request-Id"] = request_id
         return result
@@ -221,6 +253,24 @@ async def chat_completions(
     response.headers["X-Gateway-Fallbacks"] = str(result.fallbacks)
     response.headers["X-Gateway-Request-Id"] = request_id
     return result.body
+
+
+def _cache_key(response_cache: ResponseCache, request: ChatCompletionRequest) -> RequestKey | None:
+    """The cache key of the request, or None when the request does not use the cache."""
+    if request.stream or not response_cache.covers(request.model):
+        return None
+    return request_key(request.model_dump(exclude_unset=True))
+
+
+def _cached_response(cached: CachedAnswer, request_id: str) -> JSONResponse:
+    """Answer from the cache, with the headers of the target that generated the answer."""
+    response = JSONResponse(cached.body)
+    response.headers["X-Gateway-Provider"] = cached.provider
+    response.headers["X-Gateway-Model"] = cached.model
+    response.headers["X-Gateway-Fallbacks"] = "0"
+    response.headers["X-Gateway-Request-Id"] = request_id
+    response.headers["X-Gateway-Cache"] = "hit"
+    return response
 
 
 # Status for a request the client abandoned (a convention from nginx): never read.

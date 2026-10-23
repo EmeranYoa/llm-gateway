@@ -19,6 +19,7 @@ from app.api.routes import (
     validation_error_handler,
 )
 from app.auth.authenticator import AuthenticationUnavailable, Authenticator, InvalidApiKey
+from app.cache.store import ResponseCache
 from app.config import Settings, load_config
 from app.providers.base import Provider
 from app.providers.openai_compat import OpenAICompatibleProvider
@@ -84,6 +85,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         default_completion_tokens=config.default_completion_tokens,
         stream_limits=config.stream,
     )
+    app.state.response_cache = ResponseCache(redis_client, config.cached_aliases)
     app.state.usage_log = UsageLog(database_engine)
     app.state.authenticator = Authenticator(
         database_engine,

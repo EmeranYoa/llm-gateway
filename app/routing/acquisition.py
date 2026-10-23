@@ -440,7 +440,11 @@ class TenantGate:
         have generated them anyway.
         """
         if not keep_tokens:
-            await self._record(admission, "release", 0)
+            await self.release(admission)
+
+    async def release(self, admission: TenantAdmission) -> None:
+        """Give the reserved tokens back: the request used none (a cache hit, for example)."""
+        await self._record(admission, "release", 0)
 
     async def _record(self, admission: TenantAdmission, action: str, used_tokens: int) -> None:
         """Run `record_tenant_outcome.lua`, when tokens were reserved for the request."""
