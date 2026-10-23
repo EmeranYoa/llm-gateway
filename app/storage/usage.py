@@ -5,6 +5,9 @@ The prompt itself is never stored, only its length.
 
 Costs are in USD, computed when a row is written from the real token usage and
 the model price in `gateway.yaml` (USD per million tokens).
+
+Rows are kept until an operator purges them with the admin CLI
+(`purge-usage-log`): nothing deletes them automatically.
 """
 
 import datetime as dt
@@ -24,8 +27,10 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    delete,
     false,
     insert,
+    select,
 )
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import Mapped, mapped_column
@@ -219,6 +224,30 @@ class UsageLog:
         except Exception:
             # Rows hold no prompt, so the error details are safe to log.
             logger.exception("could not write the usage log of request %s", request_id)
+
+
+async def purge_usage_rows(
+    engine: AsyncEngine, before: dt.datetime, batch_size: int = 10_000
+) -> int:
+    """Delete the usage rows created before `before`, and return how many were deleted.
+
+    A row created exactly at `before` is kept. Rows are deleted `batch_size` at a
+    time, each batch in its own short transaction, so the gateway can keep writing
+    its rows while a large purge runs. A batch smaller than `batch_size` is the last one.
+    """
+    oldest = (
+        select(UsageLogRow.id)
+        .where(UsageLogRow.created_at < before)
+        .limit(batch_size)
+        .scalar_subquery()
+    )
+    deleted = 0
+    while True:
+        async with engine.begin() as connection:
+            result = await connection.execute(delete(UsageLogRow).where(UsageLogRow.id.in_(oldest)))
+        deleted += result.rowcount
+        if result.rowcount < batch_size:
+            return deleted
 
 
 def _request_columns(request: LoggedRequest) -> dict[str, Any]:

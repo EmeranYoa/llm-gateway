@@ -1,11 +1,13 @@
 """History of admin actions: what operators changed, when, and with which admin key.
 
 Every change made with the admin API or the admin CLI is recorded: keys created
-or revoked, limits set, cached answers removed. A change to the database writes
-its row in the same transaction as the change itself, so the history never
-misses a change nor records one that was rolled back. Removing cached answers
-acts on Redis, which has no shared transaction with PostgreSQL: its row is
-written right after the removal succeeds.
+or revoked, limits set, cached answers removed, usage log purged. A change to the
+database writes its row in the same transaction as the change itself, so the
+history never misses a change nor records one that was rolled back. Removing
+cached answers acts on Redis, which has no shared transaction with PostgreSQL:
+its row is written right after the removal succeeds. A usage log purge runs in
+many short transactions, one per batch: its row is written once every batch
+has succeeded.
 
 A row never holds a key value, only its short display prefix.
 """
@@ -112,6 +114,27 @@ async def record_cache_clear(
             Action.CLEAR_CACHE,
             tenant_name,
             {"alias": alias, "removed": removed},
+        )
+
+
+async def record_usage_log_purge(
+    engine: AsyncEngine, actor: Actor, older_than_days: int, cutoff: dt.datetime, deleted: int
+) -> None:
+    """Record a purge of the usage log, after it succeeded.
+
+    It concerns every tenant, so it has no target. `cutoff` is stored in ISO format.
+    """
+    async with engine.begin() as connection:
+        await record_action(
+            connection,
+            actor,
+            Action.PURGE_USAGE_LOG,
+            None,
+            {
+                "older_than_days": older_than_days,
+                "deleted": deleted,
+                "cutoff": cutoff.isoformat(),
+            },
         )
 
 

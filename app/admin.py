@@ -1,5 +1,5 @@
 """Admin command line: manage tenants, their gateway API keys and their cached answers,
-and the admin keys of operators.
+the admin keys of operators, and the size of the usage log.
 
 Usage:
     python -m app.admin create-key --tenant acme [--rpm 60] [--tokens-per-day 200000]
@@ -11,11 +11,13 @@ Usage:
     python -m app.admin create-admin-key --name alice
     python -m app.admin list-admin-keys
     python -m app.admin revoke-admin-key 3
+    python -m app.admin purge-usage-log --older-than-days 90
 
 A full key is printed only once, by create-key or create-admin-key. Other commands
 show a short prefix. Admin keys (`gwa_`) open the admin API only, never the gateway;
 they can only be created here, never through the web. Every change is recorded in
 the history of admin actions, with `cli` as the actor.
+The usage log is never purged automatically: run purge-usage-log to keep it small.
 It uses the same `DATABASE_URL` and `REDIS_URL` as the gateway.
 """
 
@@ -30,7 +32,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.cache.store import ResponseCache
 from app.config import Settings
-from app.storage.admin_actions import CLI, record_cache_clear
+from app.storage.admin_actions import CLI, record_cache_clear, record_usage_log_purge
 from app.storage.admin_keys import (
     AdminKeyInfo,
     create_admin_key,
@@ -46,6 +48,7 @@ from app.storage.tenants import (
     revoke_api_key,
     set_tenant_limits,
 )
+from app.storage.usage import purge_usage_rows
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -97,6 +100,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     revoke_admin.add_argument("id", type=int, help="admin key id, as shown by list-admin-keys")
 
+    purge = commands.add_parser(
+        "purge-usage-log", help="delete old usage rows, to keep the usage log at a chosen size"
+    )
+    purge.add_argument(
+        "--older-than-days",
+        type=_positive_int,
+        required=True,
+        help="delete the rows created more than this many days ago",
+    )
+
     args = parser.parse_args(argv)
     if args.command == "set-limits" and args.rpm is None and args.tokens_per_day is None:
         set_limits.error("give at least one limit: --rpm and/or --tokens-per-day")
@@ -118,6 +131,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_list_admin_keys())
     if args.command == "revoke-admin-key":
         return asyncio.run(_revoke_admin_key(args.id))
+    if args.command == "purge-usage-log":
+        return asyncio.run(_purge_usage_log(args.older_than_days))
     return 1
 
 
@@ -253,8 +268,23 @@ async def _revoke_admin_key(admin_key_id: int) -> int:
     return 1
 
 
+async def _purge_usage_log(older_than_days: int) -> int:
+    """Delete the usage rows created more than `older_than_days` days ago."""
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=older_than_days)
+    engine = create_async_engine(Settings().database_url)
+    try:
+        deleted = await purge_usage_rows(engine, cutoff)
+        await record_usage_log_purge(engine, CLI, older_than_days, cutoff, deleted)
+    finally:
+        await engine.dispose()
+    rows = "row" if deleted == 1 else "rows"
+    days = "day" if older_than_days == 1 else "days"
+    print(f"Deleted {deleted} usage {rows} older than {older_than_days} {days}.")
+    return 0
+
+
 def _positive_int(value: str) -> int:
-    """Parse a limit given on the command line: a whole number above zero."""
+    """Parse a number given on the command line: a whole number above zero."""
     if not value.isdigit() or int(value) == 0:
         raise argparse.ArgumentTypeError(f"must be a positive whole number, got {value!r}")
     return int(value)
