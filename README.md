@@ -2,19 +2,21 @@
 
 [![CI](https://github.com/EmeranYoa/llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/EmeranYoa/llm-gateway/actions/workflows/ci.yml)
 
-An OpenAI-compatible gateway that routes chat requests across several **free-tier LLM providers** (Groq, Google Gemini, OpenRouter, local Ollama). Your application calls one endpoint with a model **alias**. The gateway picks a real provider and model that still has quota, fails over automatically on rate limits and outages, and logs every attempt.
+An OpenAI-compatible gateway that routes chat requests across several LLM providers. Your application calls one endpoint with a model **alias**. The gateway picks a real provider and model that still has quota, fails over automatically on rate limits and outages, and logs every attempt.
 
-> **Free tiers and your data.** Some free tiers may use the prompts you send to train or improve their models. Use this gateway with public or demo data only, never with confidential or personal data. See [Free-tier providers](#free-tier-providers).
+It works with any provider that speaks the OpenAI Chat Completions API: paid APIs, free tiers, or models you host yourself (Ollama, vLLM). The example configuration uses free tiers (Groq, Google Gemini, OpenRouter) and a local Ollama model, so you can try everything at no cost.
 
 ## The problem
 
-Free LLM tiers are generous but fragile. Each provider has its own small limits (requests per minute, tokens per minute, requests per day), its own API key, its own error formats and its own outages. An application that talks to them directly must track every limit, catch every `429` and switch providers by hand. When one provider is saturated, the application fails, even though another one could have answered.
+An application that depends on LLM APIs inherits all their failures. Each provider has its own limits (requests per minute, tokens per minute, requests per day), its own API key, its own error formats and its own outages, and models get renamed or removed. An application that talks to providers directly must track every limit, catch every `429` and switch providers by hand. When its provider is saturated or down, the application fails, even though another provider could have answered.
+
+This is true of paid plans and of free tiers alike; free tiers only show it sooner, because their limits are small. And when several applications share the same provider accounts, one of them can use up the limits, or the budget, of all the others.
 
 ## What the gateway does
 
 - **One OpenAI-compatible endpoint.** The official OpenAI SDK works by changing only `base_url` and `api_key`.
 - **API keys and tenants.** Each client application (tenant) gets its own `gw_` API key, created and revoked with an admin command. Authentication is always on.
-- **Tenant quotas.** Each tenant has its own requests per minute and daily token budget, so one greedy client cannot use up the free tiers of everyone else.
+- **Tenant quotas.** Each tenant has its own requests per minute and daily token budget, so one greedy client cannot use up the provider limits, or the token budget, shared by everyone else.
 - **Aliases.** The client asks for `chat-fast`; the gateway maps it to an ordered list of real `provider/model` targets.
 - **Quotas.** It tracks RPM, TPM and RPD per target in Redis, and never sends a call that would exceed them.
 - **Automatic failover.** On a `429`, a `5xx`, a timeout or a bad API key, it moves on to the next target. On a real client error (`400`), it answers at once instead of wasting quota on every provider.
@@ -24,6 +26,13 @@ Free LLM tiers are generous but fragile. Each provider has its own small limits 
 - **Shared state.** Quotas, cooldowns and breakers live in Redis, so several gateway instances share them.
 - **Degraded mode.** If Redis goes down, the gateway keeps routing (without quota checks) instead of failing.
 - **Usage log.** Every examined target is logged in PostgreSQL with its tenant and API key: outcome, latency, tokens, fallbacks. Prompts are never stored.
+
+## Use cases
+
+- **A production application that must stay up.** Route an alias to two or three paid providers: an outage or a `429` at one of them is invisible to your users.
+- **One gateway for several applications.** Provider keys stay in one place. Each application gets its own `gw_` key, its own quotas and its own rows in the usage log.
+- **Local first, cloud as a backup** (or the reverse). Put a self-hosted model and a cloud model in the same alias.
+- **Prototyping at no cost.** Chain free tiers, as the example configuration does.
 
 ## Architecture
 
@@ -87,6 +96,8 @@ flowchart TD
 ## Quickstart
 
 Requirements: Docker with Docker Compose.
+
+> **Free tiers and your data.** The quickstart uses the example configuration, with free tiers. Some free tiers may use the prompts you send to train or improve their models: with them, use public or demo data only, never confidential or personal data. See [Free-tier providers](#free-tier-providers).
 
 ```bash
 git clone https://github.com/EmeranYoa/llm-gateway.git
@@ -180,7 +191,7 @@ To keep quotas accurate, the gateway asks the provider for the token usage of th
 
 ## Response cache
 
-Applications often ask the same question, or the same question in other words. For the aliases you choose, the gateway keeps complete answers in Redis and answers again without calling any provider: in about 65 ms instead of seconds, and without using any free-tier quota.
+Applications often ask the same question, or the same question in other words. For the aliases you choose, the gateway keeps complete answers in Redis and answers again without calling any provider: in about 65 ms instead of seconds, and without using any provider quota.
 
 ### Enable it
 
@@ -359,6 +370,29 @@ Checked on the providers' documentation on 2026-10-21. Free tiers change often (
 | [Gemini](https://ai.google.dev/gemini-api/docs/rate-limits) | `gemini-2.5-flash` | No longer published: read your project limits in Google AI Studio. The config uses conservative guesses. | 00:00 Pacific time | [Used to improve Google products](https://ai.google.dev/gemini-api/docs/pricing); human reviewers may read it. |
 | [OpenRouter](https://openrouter.ai/docs/api/reference/limits) | `google/gemma-4-31b-it:free` | 20 RPM; 50 requests per day for the whole account (1,000 after buying 10 credits) | 00:00 UTC | [Depends on the upstream provider](https://openrouter.ai/docs/guides/privacy/provider-logging) and your account privacy settings. |
 | [Ollama](https://ollama.com) (optional) | `llama3.2:3b` | None: runs on your machine | n/a | Stays on your machine. |
+
+### Paid and self-hosted providers
+
+Any API compatible with OpenAI Chat Completions can be declared as a provider, with its `base_url`, the environment variable of its key, and its models:
+
+```yaml
+providers:
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    models:
+      gpt-5-mini: { rpm: 500, tpm: 200000, timeout: 60 }   # example: use the models and limits of your plan
+  vllm:
+    base_url: http://vllm:8000/v1   # a model you host yourself
+    api_key_env: null
+    models:
+      my-model: { timeout: 120 }
+```
+
+- Set the limits of your plan, a little below the real ones: the gateway then spreads the load instead of waiting for `429`s. Without limits, it relies on `429`s and cooldowns only.
+- The provider must take its key as `Authorization: Bearer` and accept `stream_options` (see [Limitations](#limitations)).
+- Tenant token budgets become spending limits: set one per application with `set-limits`.
+- In degraded mode (Redis down), quotas are not checked. With free tiers this costs nothing; with paid providers, tenant budgets no longer cap spending while Redis is down (see [Design decisions](#design-decisions)).
 
 ## Design decisions
 
