@@ -35,7 +35,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """
     settings = settings or Settings()
     config = load_config(settings.gateway_config_path, os.environ)
-    http_client = httpx.AsyncClient()
+    # One client for provider calls and cache embeddings, so connections are reused.
+    # The keep-alive expiry stays at the httpx default (5 s) on purpose: a short idle
+    # time, so the gateway does not reuse a connection the provider already closed.
+    http_client = httpx.AsyncClient(
+        limits=httpx.Limits(
+            max_connections=settings.upstream_max_connections,
+            max_keepalive_connections=settings.upstream_max_keepalive,
+        )
+    )
     redis_client = create_redis_client(settings)
     database_engine = create_database_engine(settings)
 
@@ -55,6 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="LLM Gateway", version="0.1.0", lifespan=lifespan)
     app.state.config = config
+    app.state.http_client = http_client
     gate = TargetGate(redis_client, config.cooldown, config.breaker)
     app.state.gate = gate
     app.state.tenant_gate = TenantGate(

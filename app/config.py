@@ -24,7 +24,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,10 @@ class ConfigError(Exception):
 
 class Settings(BaseSettings):
     """Settings read from environment variables."""
+
+    # An empty variable means "use the default": a `.env` copied from `.env.example`
+    # (empty values) then starts the gateway with the defaults.
+    model_config = SettingsConfigDict(env_ignore_empty=True)
 
     gateway_config_path: Path = Path("config/gateway.yaml")
     # Default: the PostgreSQL started by docker compose, seen from the host.
@@ -52,6 +56,12 @@ class Settings(BaseSettings):
     # Seconds a verified API key keeps working while PostgreSQL is unavailable. A key
     # not verified within that time is refused until the database is back (ADR 0004).
     auth_grace_period: float = Field(default=900.0, gt=0)
+    # Most connections open at once to the providers (and the cache embedding model),
+    # for each gateway worker. A call waits for a free connection above it.
+    upstream_max_connections: int = Field(default=200, gt=0)
+    # Most idle connections kept open for reuse, for each gateway worker. A value above
+    # `upstream_max_connections` is accepted: httpcore caps it at that number.
+    upstream_max_keepalive: int = Field(default=100, gt=0)
     # Admin API only. When true, the admin API prints a one-time recovery token in
     # its log at startup: with it, someone who can read the server log gives back
     # access to an operator account (lost password, disabled or locked account).
