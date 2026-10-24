@@ -530,3 +530,20 @@ def test_admin_api_is_never_published_by_docker_compose() -> None:
     assert "ports" not in admin_api
     assert "8001" in " ".join(admin_api["command"])
     assert "app.admin_api.main:create_admin_app" in " ".join(admin_api["command"])
+
+
+def test_admin_api_runs_one_worker_only_in_docker_compose() -> None:
+    # The setup and recovery tokens and the per-address sign-in limit live in one
+    # process. An explicit `--workers` wins over WEB_CONCURRENCY from `.env`.
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    command = compose["services"]["admin-api"]["command"]
+
+    assert "--workers" in command
+    assert command[command.index("--workers") + 1] == "1"
+
+
+def test_gateway_reads_web_concurrency_with_two_workers_by_default() -> None:
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    environment = compose["services"]["gateway"]["environment"]
+
+    assert environment["WEB_CONCURRENCY"] == "${WEB_CONCURRENCY:-2}"

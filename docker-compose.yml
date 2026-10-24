@@ -12,6 +12,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
+      # Number of gateway worker processes, read by uvicorn. About one per CPU core;
+      # each one uses about 100 MB of RAM. Workers share their state through Redis.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
     depends_on:
       redis:
         condition: service_healthy
@@ -42,6 +45,11 @@ services:
         "0.0.0.0",
         "--port",
         "8001",
+        # One process only: the one-time setup and recovery tokens and the
+        # per-address sign-in limit live in its memory. Several workers would print
+        # several setup tokens. This flag wins over WEB_CONCURRENCY from `.env`.
+        "--workers",
+        "1",
       ]
     env_file:
       - path: .env
