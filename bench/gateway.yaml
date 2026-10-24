@@ -1,0 +1,36 @@
+# Benchmark configuration: every target is the mock provider (bench/mock_provider.py).
+#
+# Limits are high but present, so the Lua quota scripts check and reserve RPM, TPM
+# and RPD on every call, as they do in production, without ever refusing a call.
+#
+# There is no `tenants` section on purpose: without default limits, the benchmark
+# tenant has no RPM or daily token limit, so its quota never stops the load.
+
+cache:
+  embedding: { provider: mock, model: mock-embed, timeout: 1 }
+  max_entries_per_tenant: 1000000 # the cache miss scenario stores one entry per request
+  aliases:
+    bench-cache: {}
+
+providers:
+  mock:
+    base_url: http://mock:9000/ok/v1
+    api_key_env: null
+    models:
+      mock-model:
+        rpm: 1000000
+        tpm: 1000000000
+        rpd: 100000000
+        price: { input: 0.1, output: 0.4 } # so the cost is computed on every usage row
+
+  # Always answers 503: the first target of the failover route.
+  mockdown:
+    base_url: http://mock:9000/down/v1
+    api_key_env: null
+    models:
+      mock-model: { rpm: 1000000, tpm: 1000000000, rpd: 100000000 }
+
+routes:
+  bench: [mock/mock-model]
+  bench-failover: [mockdown/mock-model, mock/mock-model]
+  bench-cache: [mock/mock-model]

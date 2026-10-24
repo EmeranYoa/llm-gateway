@@ -1,0 +1,130 @@
+# Benchmark: the gateway against a mock provider, in its own Docker Compose project.
+#
+# Run it (from the repository root):
+#   docker compose -f bench/docker-compose.yml run --rm --build load
+#   docker compose -f bench/docker-compose.yml down -v
+#
+# It has its own Redis, PostgreSQL and network, and publishes no port, so it never
+# touches the developer's stack (project `llm-gateway`). See bench/README.md.
+name: llm-gateway-bench
+
+# The gateway image, built from this repository by default. Point
+# BENCH_GATEWAY_CONTEXT to another checkout (a path relative to this folder) to
+# measure another version. The mock and the load runner use the same image: it has
+# Python, FastAPI and uvicorn, and the runner needs the gateway's admin CLI.
+x-gateway-image: &gateway-image
+  build:
+    context: ${BENCH_GATEWAY_CONTEXT:-..}
+
+x-database-url: &database-url postgresql+asyncpg://bench:bench@postgres:5432/bench
+
+services:
+  redis:
+    image: redis:8.8
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # Fake OpenAI-compatible provider. One worker is enough: it answers more than
+  # 3000 requests per second, far more than the gateway.
+  mock:
+    <<: *gateway-image
+    command:
+      [
+        "uvicorn",
+        "mock_provider:app",
+        "--app-dir",
+        "/bench",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9000",
+        "--no-access-log",
+      ]
+    environment:
+      MOCK_DELAY_MS: ${BENCH_MOCK_DELAY_MS:-50}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./mock_provider.py:/bench/mock_provider.py:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # The gateway under test, started by the image's own command (migrations, then
+  # uvicorn), as in production. uvicorn reads WEB_CONCURRENCY as its worker count.
+  gateway:
+    <<: *gateway-image
+    environment:
+      GATEWAY_CONFIG_PATH: /bench/gateway.yaml
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: *database-url
+      WEB_CONCURRENCY: ${BENCH_WEB_CONCURRENCY:-1}
+    volumes:
+      - ./gateway.yaml:/bench/gateway.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mock:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Load runner: creates a tenant API key in the bench database (create-key prints
+  # the key on its last line), then runs load.py. Arguments given after
+  # `run --rm load` go to load.py, for example `--levels 1,10 --jsonl`.
+  load:
+    <<: *gateway-image
+    entrypoint:
+      [
+        "sh",
+        "-c",
+        'BENCH_KEY="$$(python -m app.admin create-key --tenant bench | tail -n 1)" && export BENCH_KEY && exec python /bench/load.py "$$@"',
+        "load",
+      ]
+    command: []
+    environment:
+      DATABASE_URL: *database-url
+      GATEWAY_CONFIG_PATH: /bench/gateway.yaml
+      PYTHONDONTWRITEBYTECODE: "1"
+      # Printed above the table, so a saved result says how it was measured.
+      BENCH_MOCK_DELAY_MS: ${BENCH_MOCK_DELAY_MS:-50}
+      BENCH_WEB_CONCURRENCY: ${BENCH_WEB_CONCURRENCY:-1}
+    volumes:
+      - ./load.py:/bench/load.py:ro
+      - ./gateway.yaml:/bench/gateway.yaml:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
