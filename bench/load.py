@@ -73,6 +73,8 @@ class Sample:
     """The X-Gateway-Cache header of the response, if any."""
     fallbacks: int | None
     """The X-Gateway-Fallbacks header of the response, if any."""
+    status: int | None = None
+    """The HTTP status, or None when no response came (connection error, timeout)."""
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,8 @@ class Result:
     p95_ms: float | None
     p99_ms: float | None
     ttft_p50_ms: float | None
+    redis_us_per_request: float | None
+    """CPU time of Redis per measured request, in microseconds (None for the mock)."""
     check: str
     """What the gateway headers say happened (cache result, fallbacks), to spot a
     scenario that did not do what its name says."""
@@ -265,6 +269,7 @@ async def _send(connection: Connection, raw_request: bytes, scenario: Scenario) 
         first_content_ms=first_content_ms,
         cache=response.headers.get("x-gateway-cache"),
         fallbacks=int(fallbacks) if fallbacks is not None else None,
+        status=response.status,
     )
 
 
@@ -278,7 +283,12 @@ async def _drain(
 
 
 async def run_scenario(
-    scenario: Scenario, base_url: str, key: str | None, concurrency: int, total: int
+    scenario: Scenario,
+    base_url: str,
+    key: str | None,
+    concurrency: int,
+    total: int,
+    redis_url: str | None = None,
 ) -> Result:
     next_request = _request_factory(scenario, base_url, key)
     connections = [Connection(*_host_port(base_url)) for _ in range(concurrency)]
@@ -290,15 +300,60 @@ async def run_scenario(
         await asyncio.gather(*(_send(c, next_request(), scenario) for c in connections))
         samples: list[Sample] = []
         requests = (next_request() for _ in range(total))
+        redis_before = await redis_cpu_seconds(redis_url) if redis_url else None
         start = time.perf_counter()
         await asyncio.gather(*(_drain(c, requests, scenario, samples) for c in connections))
         wall = time.perf_counter() - start
+        redis_after = await redis_cpu_seconds(redis_url) if redis_url else None
     finally:
         await asyncio.gather(*(c.close() for c in connections))
-    return _summarise(scenario, concurrency, samples, wall)
+    redis_us = None
+    if redis_before is not None and redis_after is not None and samples:
+        # Background work of the previous requests (usage log, cache writes) does not
+        # touch Redis much, so the delta is close to the cost of these requests.
+        redis_us = round((redis_after - redis_before) * 1_000_000 / len(samples), 1)
+    return _summarise(scenario, concurrency, samples, wall, redis_us)
 
 
-def _summarise(scenario: Scenario, concurrency: int, samples: list[Sample], wall: float) -> Result:
+async def redis_cpu_seconds(url: str) -> float | None:
+    """CPU seconds used so far by the main thread of Redis, from `INFO cpu`.
+
+    The main thread runs every command and Lua script, so its CPU time per request is
+    what the gateway costs Redis. Speaks RESP directly to keep to the standard library.
+    None when Redis cannot be read: the column is then left empty.
+    """
+    host, port = _host_port(url)
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+    except OSError:
+        return None
+    try:
+        writer.write(b"*2\r\n$4\r\nINFO\r\n$3\r\ncpu\r\n")
+        await writer.drain()
+        header = await reader.readline()  # b"$<length>\r\n"
+        if not header.startswith(b"$"):
+            return None
+        info = (await reader.readexactly(int(header[1:]) + 2)).decode()
+    except (OSError, ValueError, asyncio.IncompleteReadError):
+        return None
+    finally:
+        writer.close()
+    fields = dict(line.split(":", 1) for line in info.splitlines() if ":" in line)
+    try:
+        return float(fields["used_cpu_sys_main_thread"]) + float(
+            fields["used_cpu_user_main_thread"]
+        )
+    except (KeyError, ValueError):
+        return None
+
+
+def _summarise(
+    scenario: Scenario,
+    concurrency: int,
+    samples: list[Sample],
+    wall: float,
+    redis_us_per_request: float | None = None,
+) -> Result:
     latencies = [s.latency_ms for s in samples if s.ok]
     first_content = [s.first_content_ms for s in samples if s.ok and s.first_content_ms is not None]
     return Result(
@@ -311,6 +366,7 @@ def _summarise(scenario: Scenario, concurrency: int, samples: list[Sample], wall
         p95_ms=_percentile(latencies, 95),
         p99_ms=_percentile(latencies, 99),
         ttft_p50_ms=_percentile(first_content, 50) if scenario.stream else None,
+        redis_us_per_request=redis_us_per_request,
         check=_check(samples),
     )
 
@@ -333,6 +389,13 @@ def _check(samples: list[Sample]) -> str:
     fallbacks = [s.fallbacks for s in samples if s.fallbacks is not None]
     if fallbacks and any(fallbacks):
         notes.append(f"fallbacks {sum(fallbacks) / len(fallbacks):.2f}")
+    # What the errors were: an HTTP status, a stream cut before [DONE], or no response.
+    failures = Counter(
+        "no response" if s.status is None else ("cut stream" if s.status == 200 else str(s.status))
+        for s in samples
+        if not s.ok
+    )
+    notes += [f"error {kind} x{count}" for kind, count in failures.most_common()]
     return ", ".join(notes)
 
 
@@ -350,6 +413,7 @@ COLUMNS = [
     "p99 ms",
     "overhead p50 ms",
     "TTFT p50 ms",
+    "Redis us/req",
     "check",
 ]
 
@@ -377,6 +441,7 @@ def markdown_table(results: list[Result], scenarios: list[Scenario]) -> str:
                 _ms(result.p99_ms),
                 overhead,
                 _ms(result.ttft_p50_ms),
+                _ms(result.redis_us_per_request),
                 result.check,
             ]
         )
@@ -420,6 +485,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--gateway-url", default=os.environ.get("BENCH_GATEWAY_URL", "http://gateway:8000")
     )
     parser.add_argument("--mock-url", default=os.environ.get("BENCH_MOCK_URL", "http://mock:9000"))
+    parser.add_argument(
+        "--redis-url",
+        default=os.environ.get("BENCH_REDIS_URL", "redis://redis:6379"),
+        help="Redis of the gateway, read for the Redis CPU time per request",
+    )
     args = parser.parse_args(argv)
     names = {s.name for s in SCENARIOS}
     unknown = set(args.scenarios.split(",")) - names
@@ -460,7 +530,10 @@ async def main(argv: list[str]) -> None:
         total = args.requests or max(300, 40 * concurrency)
         for scenario in scenarios:
             print(f"{scenario.name}, concurrency {concurrency}...", file=sys.stderr, flush=True)
-            result = await run_scenario(scenario, urls[scenario.target], key, concurrency, total)
+            redis_url = args.redis_url if scenario.target == "gateway" else None
+            result = await run_scenario(
+                scenario, urls[scenario.target], key, concurrency, total, redis_url
+            )
             results.append(result)
             if args.jsonl:
                 print(json.dumps(asdict(result)), flush=True)

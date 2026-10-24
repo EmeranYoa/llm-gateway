@@ -37,6 +37,7 @@ Options, given after `load`:
 | `--requests N` | `max(300, 40 x concurrency)` | measured requests per scenario and level |
 | `--scenarios a,b` | all | scenarios to run, by name (see below) |
 | `--jsonl` | off | also print one JSON line per result, as each one ends |
+| `--redis-url URL` | `redis://redis:6379` | the gateway's Redis, read for the `Redis us/req` column |
 
 Environment variables, set before `docker compose`:
 
@@ -79,9 +80,14 @@ Columns of the table:
   for cache hits: the gateway answers without waiting for the provider.
 - `TTFT p50 ms`: for streams, time to the first event with content (time to first
   token).
+- `Redis us/req`: CPU time of the Redis main thread per measured request, in
+  microseconds (from `INFO cpu`, before and after the measured requests). Redis runs
+  every command and Lua script on that one thread, so this is what each request costs
+  the Redis shared by every worker and gateway instance.
 - `check`: what the gateway's response headers say happened (`X-Gateway-Cache`, the
   mean of `X-Gateway-Fallbacks`), to spot a scenario that did not do what its name
-  says.
+  says, and what the errors were: an HTTP status, `cut stream` (a stream without
+  `[DONE]`) or `no response` (connection error or timeout).
 
 What the gateway does on each call, as in production: API key check, the tenant
 quota script, the target quota script (`bench/gateway.yaml` gives the mock high but
