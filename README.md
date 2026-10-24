@@ -364,6 +364,9 @@ It deletes in small batches, so the gateway keeps writing while it runs, and rec
 | `DATABASE_TIMEOUT` | `5` | Seconds after which a usage log write or an API key check gives up. |
 | `AUTH_CACHE_TTL` | `60` | Seconds a verified API key is trusted without a new database check. A revoked key or new tenant limits take effect within that time. |
 | `AUTH_GRACE_PERIOD` | `900` | Seconds a verified API key keeps working while PostgreSQL is unavailable. Other keys get `503 authentication_unavailable`. |
+| `WEB_CONCURRENCY` | `2` (Docker Compose) | Gateway worker processes, read by uvicorn. About one per CPU core; each uses about 100 MB of RAM. Workers share their state through Redis. The admin API always runs one. |
+| `UPSTREAM_MAX_CONNECTIONS` | `200` | Most connections open at once to the providers (and the cache embedding model), per gateway worker. A call waits for a free connection above it. |
+| `UPSTREAM_MAX_KEEPALIVE` | `100` | Most idle connections kept open for reuse, per gateway worker, so that calls do not open a new TLS connection each time. |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `gateway` | Credentials of the PostgreSQL started by Docker Compose. |
 | `DASHBOARD_SESSION_SECRET` | (none) | Dashboard only. Encrypts its session cookie. At least 32 characters, or the dashboard refuses to start. |
 | `OPERATOR_RECOVERY` | `false` | Admin API only. `true` prints a one-time recovery token at startup, to give back access to an operator account. Remove it once done. |
@@ -479,6 +482,49 @@ providers:
 - Tenant token budgets become spending limits: set one per application with `set-limits`.
 - In degraded mode (Redis down), quotas are not checked. With free tiers this costs nothing; with paid providers, tenant budgets no longer cap spending while Redis is down (see [Design decisions](#design-decisions)).
 
+## Performance
+
+The gateway adds about **7 ms** to a call, against hundreds of milliseconds for a provider (about 700 ms for Groq in our usage log), and a cache hit answers in about **4 ms**. With free tiers, the provider quotas are the limit, long before the gateway.
+
+### How it is measured
+
+[`bench/`](bench/README.md) runs the gateway against a mock provider that answers after 50 ms, in its own Docker Compose project, with one command:
+
+```bash
+docker compose -f bench/docker-compose.yml run --rm --build load
+docker compose -f bench/docker-compose.yml down -v
+```
+
+The gateway does all its real work on each call: API key check, tenant quota script, target quota and breaker script (the mock has high but present limits), the call, the outcome script and the usage log row. Each figure below is the median of 3 runs, on one machine running everything: AMD Ryzen 5 5600H (6 cores, 12 threads), Windows 11, Docker Desktop. They are orders of magnitude: run the benchmark on your own hardware.
+
+### Results
+
+Gateway overhead, one request at a time:
+
+| | Through the gateway | Added by the gateway |
+|---|---|---|
+| Chat completion (mock answers in 51 ms) | 58 ms | +7 ms |
+| Stream, time to first token (mock: 51 ms) | 60 ms | +9 ms |
+| First target down (breaker open: skipped, then the second target) | 60 ms | +8 ms |
+| Cache hit (exact) | 3.9 ms | no provider call |
+
+Under load (50 concurrent connections), v0.5.1 against v0.5.2:
+
+| Scenario | Workers | Redis CPU per request | Requests per second |
+|---|---|---|---|
+| Chat completion | 1 | 1,436 µs → **323 µs** | 109 → 109 |
+| Chat completion | 2 | 1,413 µs → **302 µs** | 191 → 211 |
+| Stream | 1 | 2,575 µs → **320 µs** | 112 → 125 |
+| First target down | 2 | 4,133 µs → **389 µs** | 157 → 194 |
+
+What changed in v0.5.2, and why it matters:
+
+- **Redis does 4 to 10 times less work per request.** The TPM check used to read the whole 60-second window of a target on every call, so its cost grew with the traffic; a running counter now does the same check in constant time (ADR 0009). Redis runs scripts one at a time and is shared by every worker and every gateway instance: it is the part that would have stopped the gateway from scaling out.
+- **Workers scale.** Two workers serve about twice the requests of one (211 against 109 req/s; 471 against 286 for cache hits). Docker Compose now starts two by default (`WEB_CONCURRENCY`).
+- **Less wasted CPU per request.** httpcore tried to import a missing package (`sniffio`) on every request, and the shared HTTP client kept only 20 idle connections to the providers. Both are fixed (`UPSTREAM_MAX_CONNECTIONS`, `UPSTREAM_MAX_KEEPALIVE`).
+
+Where the limit is now: one worker serves about 110 to 125 requests per second on this machine, bound by the Python CPU time of each request (FastAPI, the HTTP client, the usage log write). Add workers, or gateway instances behind a load balancer: their shared state lives in Redis.
+
 ## Design decisions
 
 **One atomic Lua script per call.** Before a call, the `acquire_target` script checks, in one atomic Redis operation, the cooldown, the circuit breaker and the RPM/TPM/RPD quotas, and reserves the quota only if every check passes. Separate Redis calls would race under concurrent requests: two requests could both see "1 request left" and both take it. A test sends 20 concurrent requests to a target limited to 5 per minute and checks that exactly 5 reach it; it fails if the check and the reservation are split.
@@ -498,6 +544,8 @@ providers:
 **401, 403 and 404 fail over.** They mean a bad key or a removed model: a gateway configuration problem. The gateway logs an error, puts the target in a long cooldown and tries the next one, instead of returning a misleading `401` to the client.
 
 **400, not 503, when a request is too large for every target.** The OpenAI SDK retries `503` automatically; it would retry forever a request that can never fit.
+
+**A running counter for each TPM window.** The tokens of the last 60 seconds of a target live in a Redis sorted set, one member per call, so that the window really slides. Summing it on every call cost more as traffic grew. A counter next to it holds the total: each check reads only the calls that left the window. The scripts keep the two in step atomically; the counter expires with its window, is rebuilt once when missing (an upgrade needs no migration), and is cleared when the window is empty, so a drift cannot last.
 
 **Token accounting.** Before a call, the gateway reserves an estimate (`characters / 4`, plus `max_tokens` or `default_completion_tokens`, capped at the target TPM). After the call it replaces the estimate with the real usage, releases it on failure, and keeps it on timeout (the provider may have generated tokens anyway). The request itself always stays counted.
 
@@ -550,6 +598,10 @@ cd dashboard
 bun install
 bun run lint && bun run format:check && bun run typecheck && bun run test
 bun run export:openapi && bun run generate:api   # after a change to the admin API
+
+# Benchmark against a mock provider (see bench/README.md).
+docker compose -f bench/docker-compose.yml run --rm --build load
+docker compose -f bench/docker-compose.yml down -v
 ```
 
 Tests go through the HTTP API: upstream providers are mocked with [respx](https://lundberg.github.io/respx/), Redis and PostgreSQL are real. They cover failover on `429`, `5xx` and timeouts, no failover on `400`, cooldowns, circuit breaker transitions (including the half-open trial under concurrency), concurrent quota reservation, `Retry-After`, streaming (failover before the first token, interruptions, stream timeouts, client disconnects, token usage), the response cache (exact and semantic hits, isolation per tenant and alias, eligibility, streams, bypass, entry limit, failures), the deadline, degraded mode, API keys (revocation, cache, database outages), tenant quotas under concurrency, the admin command line run as a real process, the admin API (exact statistics on known rows, key separation, live state, admin actions recorded in the same transaction), and the official OpenAI SDK. The dashboard is tested with Vitest and Testing Library (session, API client, every screen). CI runs the same checks on every push.
