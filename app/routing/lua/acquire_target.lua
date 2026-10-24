@@ -7,6 +7,7 @@
 -- KEYS[5]  breaker "open" key: exists (with a TTL) while the breaker is open
 -- KEYS[6]  breaker "half-open" marker: exists once the breaker has opened, until a trial succeeds
 -- KEYS[7]  breaker trial slot: exists while the single half-open trial call is running
+-- KEYS[8]  TPM counter: total tokens of the members of the TPM window (see ADR 0009)
 -- ARGV[1]  reservation id, unique per call
 -- ARGV[2]  estimated tokens of the call
 -- ARGV[3]  RPM limit (0 means no limit)
@@ -17,13 +18,78 @@
 --
 -- Returns {"ok", is_trial} when the target can be called (its quota is then reserved,
 -- and is_trial is 1 when this call is the half-open trial), or {reason, wait_ms}
--- when it must be skipped for wait_ms milliseconds. Nothing is written unless every
--- check passes.
+-- when it must be skipped for wait_ms milliseconds. Nothing is reserved unless every
+-- check passes; the only writes before that forget the reservations that left a
+-- window, and keep the TPM counter equal to its window.
 
 local WINDOW_MS = 60000
 
 local function tokens_of(member)
   return tonumber(string.match(member, ":(%d+)$"))
+end
+
+-- Remove the reservations that left the TPM window and return the tokens still in it.
+--
+-- The counter (KEYS[8]) always holds the total of the window, so only the expired
+-- members are read: the cost does not grow with the traffic. Two rules keep the
+-- counter right, even after a bug or an upgrade:
+-- - counter missing while the window is not empty (upgrade from v0.5.1): rebuild it
+--   once from the whole window, with the TTL of the window;
+-- - window empty: the counter is deleted (a missing counter counts 0), so a drift
+--   cannot outlive the window.
+local function tpm_used(now_ms)
+  local window_start = now_ms - WINDOW_MS
+  local counter = redis.call("GET", KEYS[8])
+
+  if not counter then
+    redis.call("ZREMRANGEBYSCORE", KEYS[3], "-inf", window_start)
+    local used = 0
+    for _, member in ipairs(redis.call("ZRANGE", KEYS[3], 0, -1)) do
+      used = used + tokens_of(member)
+    end
+    local window_ms = redis.call("PTTL", KEYS[3])
+    if window_ms ~= -2 then
+      -- -2: no window, nothing to rebuild. -1: a window without TTL, given the usual one.
+      redis.call("SET", KEYS[8], used, "PX", window_ms > 0 and window_ms or WINDOW_MS)
+    end
+    return used
+  end
+
+  local used = tonumber(counter)
+  local expired = redis.call("ZRANGEBYSCORE", KEYS[3], "-inf", window_start)
+  if #expired > 0 then
+    for _, member in ipairs(expired) do
+      used = used - tokens_of(member)
+    end
+    redis.call("ZREMRANGEBYSCORE", KEYS[3], "-inf", window_start)
+    redis.call("SET", KEYS[8], used, "KEEPTTL")
+  end
+  if redis.call("EXISTS", KEYS[3]) == 0 then
+    redis.call("DEL", KEYS[8])
+    return 0
+  end
+  return used
+end
+
+-- How long until enough of the oldest reservations leave the window for `tokens` to fit.
+-- Only called on a refusal; it reads the oldest members first and stops early.
+local function tpm_wait_ms(now_ms, used, tokens, tpm_limit)
+  local batch = 100
+  local freed = 0
+  local first = 0
+  while true do
+    local entries = redis.call("ZRANGE", KEYS[3], first, first + batch - 1, "WITHSCORES")
+    for i = 1, #entries, 2 do
+      freed = freed + tokens_of(entries[i])
+      if used - freed + tokens <= tpm_limit then
+        return tonumber(entries[i + 1]) + WINDOW_MS - now_ms
+      end
+    end
+    if #entries < batch * 2 then
+      return WINDOW_MS
+    end
+    first = first + batch
+  end
 end
 
 -- 1. Cooldown.
@@ -70,24 +136,10 @@ if rpm_limit > 0 then
 end
 
 if tpm_limit > 0 then
-  redis.call("ZREMRANGEBYSCORE", KEYS[3], "-inf", now_ms - WINDOW_MS)
-  local entries = redis.call("ZRANGE", KEYS[3], 0, -1, "WITHSCORES")
-  local used = 0
-  for i = 1, #entries, 2 do
-    used = used + tokens_of(entries[i])
-  end
+  local used = tpm_used(now_ms)
   if used + tokens > tpm_limit then
     -- Wait until enough of the oldest reservations leave the window.
-    local wait_ms = WINDOW_MS
-    local freed = 0
-    for i = 1, #entries, 2 do
-      freed = freed + tokens_of(entries[i])
-      if used - freed + tokens <= tpm_limit then
-        wait_ms = tonumber(entries[i + 1]) + WINDOW_MS - now_ms
-        break
-      end
-    end
-    return {"tpm", math.max(wait_ms, 1)}
+    return {"tpm", math.max(tpm_wait_ms(now_ms, used, tokens, tpm_limit), 1)}
   end
 end
 
@@ -106,7 +158,9 @@ if rpm_limit > 0 then
 end
 if tpm_limit > 0 then
   redis.call("ZADD", KEYS[3], now_ms, reservation_id .. ":" .. tokens)
+  redis.call("INCRBY", KEYS[8], tokens)
   redis.call("PEXPIRE", KEYS[3], WINDOW_MS)
+  redis.call("PEXPIRE", KEYS[8], WINDOW_MS)
 end
 if rpd_limit > 0 then
   redis.call("INCR", KEYS[4])

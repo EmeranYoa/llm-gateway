@@ -360,6 +360,7 @@ class TargetGate:
                 _key("rate_limit_streak", target),
                 _key("tpm", target),
                 *_breaker_keys(target),
+                _key("tpm_used", target),
             ],
             args=[
                 cooldown,
@@ -532,8 +533,9 @@ def _key(kind: str, target: Target) -> str:
 def _state_keys(target: Target, day: dt.date) -> list[str]:
     """Keys of everything that can block a target, in the order `acquire_target.lua` expects.
 
-    Cooldown, RPM and TPM windows, RPD counter of the quota `day`, then the
-    breaker "open" key, "half-open" marker and trial slot.
+    Cooldown, RPM and TPM windows, RPD counter of the quota `day`, the
+    breaker "open" key, "half-open" marker and trial slot, then the token
+    counter of the TPM window (ADR 0009).
     """
     return [
         _key("cooldown", target),
@@ -541,6 +543,7 @@ def _state_keys(target: Target, day: dt.date) -> list[str]:
         _key("tpm", target),
         f"{_key('rpd', target)}:{day.isoformat()}",
         *_breaker_keys(target)[1:],
+        _key("tpm_used", target),
     ]
 
 

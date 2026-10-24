@@ -11,6 +11,7 @@
 -- KEYS[5]  breaker "open" key: exists (with a TTL) while the breaker is open
 -- KEYS[6]  breaker "half-open" marker: exists once the breaker has opened, until a trial succeeds
 -- KEYS[7]  breaker trial slot: exists while the single half-open trial call is running
+-- KEYS[8]  TPM counter: total tokens of the members of the TPM window
 --
 -- Returns {now_ms, cooldown_ms, open_ms, half_open, trial_ms, rpm_used, tpm_used, rpd_used}:
 -- the Redis time, the time left of the cooldown, of the open breaker and of the trial
@@ -38,9 +39,22 @@ local window_start = "(" .. (now_ms - WINDOW_MS)
 
 local rpm_used = redis.call("ZCOUNT", KEYS[2], window_start, "+inf")
 
+-- The same rules as acquire_target.lua, without writing: the counter minus the
+-- reservations that left the window but are not removed yet; the whole window when
+-- there is no counter (upgrade from v0.5.1); 0 when the window is empty.
 local tpm_used = 0
-for _, member in ipairs(redis.call("ZRANGEBYSCORE", KEYS[3], window_start, "+inf")) do
-  tpm_used = tpm_used + tokens_of(member)
+if redis.call("ZCOUNT", KEYS[3], window_start, "+inf") > 0 then
+  local counter = redis.call("GET", KEYS[8])
+  if counter then
+    tpm_used = tonumber(counter)
+    for _, member in ipairs(redis.call("ZRANGEBYSCORE", KEYS[3], "-inf", now_ms - WINDOW_MS)) do
+      tpm_used = tpm_used - tokens_of(member)
+    end
+  else
+    for _, member in ipairs(redis.call("ZRANGEBYSCORE", KEYS[3], window_start, "+inf")) do
+      tpm_used = tpm_used + tokens_of(member)
+    end
+  end
 end
 
 local rpd_used = tonumber(redis.call("GET", KEYS[4]) or "0")

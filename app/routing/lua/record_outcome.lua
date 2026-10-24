@@ -7,6 +7,7 @@
 -- KEYS[5]  breaker "open" key
 -- KEYS[6]  breaker "half-open" marker
 -- KEYS[7]  breaker trial slot
+-- KEYS[8]  TPM counter: total tokens of the TPM window (see acquire_target.lua)
 -- ARGV[1]  cooldown outcome: "success", "rate_limited", "misconfigured" or "none"
 -- ARGV[2]  retry delay in milliseconds given by the provider, or -1 when unknown
 -- ARGV[3]  first progressive cooldown, in milliseconds
@@ -27,18 +28,33 @@
 -- 1. Token accounting. The request itself always stays in the RPM window and
 -- the RPD counter: the provider may have counted it even when the call failed.
 local reservation_id = ARGV[6]
+local reserved_tokens = tonumber(ARGV[7])
 local reserved_member = reservation_id .. ":" .. ARGV[7]
 local token_action = ARGV[8]
 local used_tokens = tonumber(ARGV[9])
 
+-- Keep the TPM counter equal to its window. INCRBY keeps the TTL of the counter, the
+-- same as the window's. Without a counter (upgrade from v0.5.1), the next call of
+-- acquire_target.lua rebuilds it from the window.
+local function add_to_counter(delta)
+  if delta ~= 0 and redis.call("EXISTS", KEYS[8]) == 1 then
+    redis.call("INCRBY", KEYS[8], delta)
+  end
+end
+
+-- Only a reservation still in the window changes it: one that already left it was
+-- subtracted from the counter then.
 if token_action == "release" then
-  redis.call("ZREM", KEYS[3], reserved_member)
+  if redis.call("ZREM", KEYS[3], reserved_member) == 1 then
+    add_to_counter(-reserved_tokens)
+  end
 elseif token_action == "correct" and used_tokens >= 0 then
   -- Keep the reservation time, replace the estimate with the real usage.
   local reserved_at = redis.call("ZSCORE", KEYS[3], reserved_member)
   if reserved_at then
     redis.call("ZREM", KEYS[3], reserved_member)
     redis.call("ZADD", KEYS[3], reserved_at, reservation_id .. ":" .. used_tokens)
+    add_to_counter(used_tokens - reserved_tokens)
   end
 end
 
